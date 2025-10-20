@@ -138,4 +138,32 @@ public class RowLangScriptTests
         var result = (StringValue)context.Invoke(factory, "make");
         Assert.Equal("hello", result.Value);
     }
+
+    [Fact]
+    public void MethodSupportsArithmeticAndConcatPrimitives()
+    {
+        const string source = """
+        (module
+          (class Calculator
+            (open)
+            (method compute
+              (return int)
+              (body (+ (const int 40) (const int 2))))
+            (method shout
+              (return str)
+              (body
+                (let ((value (+ (const int 1) (const int 2))))
+                  (concat (const str "Result: ") value))))))
+        """;
+
+        var module = RowLangScript.Compile(source);
+        var context = module.CreateExecutionContext();
+        var calculator = context.Instantiate("Calculator");
+
+        var numeric = (IntValue)context.Invoke(calculator, "compute");
+        Assert.Equal(42, numeric.Value);
+
+        var message = (StringValue)context.Invoke(calculator, "shout");
+        Assert.Equal("Result: 3", message.Value);
+    }
 }

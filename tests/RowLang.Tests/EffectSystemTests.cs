@@ -14,11 +14,18 @@ public class EffectSystemTests
         (module
           (effect async)
           (class File
+            !trace
             (open)
+            !profile
             (method read
               (return str)
-              (effects async)
-              (body (const str payload)))))
+              (effects [async])
+              (body !audit
+                (let (
+                      (meta { tags = ["async" "file"] retries = (const int 0) })
+                      (message (concat (const str payload) (const str "!")))
+                     )
+                  message)))))
         """;
 
         var module = RowLangScript.Compile(script);
@@ -34,7 +41,7 @@ public class EffectSystemTests
         using (context.PushEffectScope(asyncEffect))
         {
             var result = (StringValue)context.Invoke(instance, "read");
-            Assert.Equal("payload", result.Value);
+            Assert.Equal("payload!", result.Value);
         }
     }
 
@@ -46,11 +53,16 @@ public class EffectSystemTests
           (effect async)
           (effect IoError)
           (class Worker
+            !trace
             (open)
             (method work
               (return str)
-              (effects async IoError)
-              (body (const str ok)))))
+              (effects [async IoError])
+              (body
+                (let (
+                      (payload { message = (const str ok) retries = [1 2 3] })
+                     )
+                  (concat (const str ok) (const str "!")))))))
         """;
 
         var module = RowLangScript.Compile(script);
@@ -74,7 +86,7 @@ public class EffectSystemTests
             using (context.PushEffectScope(ioEffect))
             {
                 var result = (StringValue)context.Invoke(worker, "work");
-                Assert.Equal("ok", result.Value);
+                Assert.Equal("ok!", result.Value);
             }
         }
     }

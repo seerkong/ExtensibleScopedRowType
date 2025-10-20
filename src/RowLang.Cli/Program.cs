@@ -146,11 +146,14 @@ const string script = """
 (module
   (effect async)
   (class ScriptFile
+    !trace
     (open)
     (method read
       (return str)
-      (effects async)
-      (body (const str script-data)))))
+      (effects [async])
+      (body ^logged
+        (let ((payload { message = (const str script-data) tags = ["cli" "demo"] }))
+          (concat (const str script-data) (const str "!")))))))
 """;
 
 Console.WriteLine("\nScript-based module demo:\n" + script + "\n");

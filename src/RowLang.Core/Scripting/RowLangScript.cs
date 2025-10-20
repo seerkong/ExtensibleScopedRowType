@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Linq;
+using System.Text;
 using RowLang.Core.Syntax;
 using RowLang.Core.Runtime;
 using RowLang.Core.Types;
@@ -196,7 +198,7 @@ public static class RowLangScript
                         isOpen = false;
                         break;
                     case "extends":
-                        foreach (var entry in clause.Elements[1..])
+                        foreach (var entry in FlattenArgumentNodes(clause.Elements.Skip(1)))
                         {
                             var baseName = ExpectIdentifier(entry, "row type base").QualifiedName;
                             var symbol = _registry.Require(baseName);
@@ -339,7 +341,7 @@ public static class RowLangScript
                         returnType = ResolveType(section.Elements[1], "return type");
                         break;
                     case "effects":
-                        foreach (var effectNode in section.Elements[1..])
+                        foreach (var effectNode in FlattenArgumentNodes(section.Elements.Skip(1)))
                         {
                             var effectName = ExpectIdentifier(effectNode, "effect name").QualifiedName;
                             effects.Add(_registry.GetOrCreateEffect(effectName));
@@ -478,6 +480,8 @@ public static class RowLangScript
                     SExprIdentifier identifier => EvaluateIdentifier(identifier, scope, invocation),
                     SExprString str => new StringValue(str.Value),
                     SExprList list => EvaluateList(list, scope, invocation, arguments),
+                    SExprArray array => EvaluateArray(array, scope, invocation, arguments),
+                    SExprObject obj => EvaluateObject(obj, scope, invocation, arguments),
                     _ => throw new InvalidOperationException($"Unsupported expression '{node}'."),
                 };
             }
@@ -491,15 +495,33 @@ public static class RowLangScript
                 }
 
                 var name = identifier.QualifiedName;
-                return name switch
+                if (string.Equals(name, "self", StringComparison.Ordinal))
                 {
-                    "self" => invocation.Self ?? throw new InvalidOperationException("Method invoked without a self instance."),
-                    "true" => new BoolValue(true),
-                    "false" => new BoolValue(false),
-                    _ when scope.TryGet(name, out var value) => value,
-                    _ => throw new InvalidOperationException(
-                        $"Unknown identifier '{name}' in method '{_specification.Owner}::{_specification.Name}'."),
-                };
+                    return invocation.Self ?? throw new InvalidOperationException("Method invoked without a self instance.");
+                }
+
+                if (string.Equals(name, "true", StringComparison.Ordinal))
+                {
+                    return new BoolValue(true);
+                }
+
+                if (string.Equals(name, "false", StringComparison.Ordinal))
+                {
+                    return new BoolValue(false);
+                }
+
+                if (scope.TryGet(name, out var scoped))
+                {
+                    return scoped;
+                }
+
+                if (int.TryParse(name, NumberStyles.Integer, CultureInfo.InvariantCulture, out var number))
+                {
+                    return new IntValue(number);
+                }
+
+                throw new InvalidOperationException(
+                    $"Unknown identifier '{name}' in method '{_specification.Owner}::{_specification.Name}'.");
             }
 
             private Value EvaluateList(SExprList list, Scope scope, InvocationContext invocation, IReadOnlyList<Value> arguments)
@@ -516,6 +538,11 @@ public static class RowLangScript
                     "let" => EvaluateLet(list, scope, invocation, arguments),
                     "call" => EvaluateCall(list, scope, invocation, arguments),
                     "new" => EvaluateNew(list, invocation),
+                    "+" => EvaluateAddition(list, scope, invocation, arguments),
+                    "-" => EvaluateSubtraction(list, scope, invocation, arguments),
+                    "*" => EvaluateMultiplication(list, scope, invocation, arguments),
+                    "/" => EvaluateDivision(list, scope, invocation, arguments),
+                    "concat" => EvaluateConcat(list, scope, invocation, arguments),
                     _ => throw new InvalidOperationException($"Unknown expression form '{head.QualifiedName}'."),
                 };
             }
@@ -645,11 +672,172 @@ public static class RowLangScript
                 var classIdentifier = ModuleBuilder.ExpectIdentifier(list.Elements[1], "class name");
                 return invocation.Execution.Instantiate(classIdentifier.QualifiedName);
             }
+
+            private Value EvaluateArray(SExprArray array, Scope scope, InvocationContext invocation, IReadOnlyList<Value> arguments)
+            {
+                var builder = ImmutableArray.CreateBuilder<Value>(array.Elements.Length);
+                foreach (var element in array.Elements)
+                {
+                    builder.Add(Evaluate(element, scope, invocation, arguments));
+                }
+
+                return new ListValue(builder.ToImmutable());
+            }
+
+            private Value EvaluateObject(SExprObject obj, Scope scope, InvocationContext invocation, IReadOnlyList<Value> arguments)
+            {
+                var builder = ImmutableDictionary.CreateBuilder<string, Value>();
+                builder.KeyComparer = StringComparer.Ordinal;
+
+                foreach (var property in obj.Properties)
+                {
+                    var key = ResolvePropertyKey(property.Key);
+                    var value = Evaluate(property.Value, scope, invocation, arguments);
+                    builder[key] = value;
+                }
+
+                return new MapValue(builder.ToImmutable());
+            }
+
+            private Value EvaluateAddition(SExprList list, Scope scope, InvocationContext invocation, IReadOnlyList<Value> arguments)
+            {
+                EnsureOperandCount(list, minimum: 2, form: "+");
+                var sum = 0;
+                for (var i = 1; i < list.Elements.Length; i++)
+                {
+                    sum += EvaluateIntOperand(list.Elements[i], scope, invocation, arguments);
+                }
+
+                return new IntValue(sum);
+            }
+
+            private Value EvaluateSubtraction(SExprList list, Scope scope, InvocationContext invocation, IReadOnlyList<Value> arguments)
+            {
+                EnsureOperandCount(list, minimum: 1, form: "-");
+                var initial = EvaluateIntOperand(list.Elements[1], scope, invocation, arguments);
+                if (list.Elements.Length == 2)
+                {
+                    return new IntValue(-initial);
+                }
+
+                var result = initial;
+                for (var i = 2; i < list.Elements.Length; i++)
+                {
+                    result -= EvaluateIntOperand(list.Elements[i], scope, invocation, arguments);
+                }
+
+                return new IntValue(result);
+            }
+
+            private Value EvaluateMultiplication(SExprList list, Scope scope, InvocationContext invocation, IReadOnlyList<Value> arguments)
+            {
+                EnsureOperandCount(list, minimum: 2, form: "*");
+                var product = 1;
+                for (var i = 1; i < list.Elements.Length; i++)
+                {
+                    product *= EvaluateIntOperand(list.Elements[i], scope, invocation, arguments);
+                }
+
+                return new IntValue(product);
+            }
+
+            private Value EvaluateDivision(SExprList list, Scope scope, InvocationContext invocation, IReadOnlyList<Value> arguments)
+            {
+                EnsureOperandCount(list, minimum: 2, form: "/");
+                var result = EvaluateIntOperand(list.Elements[1], scope, invocation, arguments);
+                for (var i = 2; i < list.Elements.Length; i++)
+                {
+                    var divisor = EvaluateIntOperand(list.Elements[i], scope, invocation, arguments);
+                    if (divisor == 0)
+                    {
+                        throw new InvalidOperationException("Division by zero.");
+                    }
+
+                    result /= divisor;
+                }
+
+                return new IntValue(result);
+            }
+
+            private Value EvaluateConcat(SExprList list, Scope scope, InvocationContext invocation, IReadOnlyList<Value> arguments)
+            {
+                EnsureOperandCount(list, minimum: 1, form: "concat");
+                var builder = new StringBuilder();
+                for (var i = 1; i < list.Elements.Length; i++)
+                {
+                    var value = Evaluate(list.Elements[i], scope, invocation, arguments);
+                    builder.Append(CoerceToString(value));
+                }
+
+                return new StringValue(builder.ToString());
+            }
+
+            private static string ResolvePropertyKey(SExprNode node)
+            {
+                return node switch
+                {
+                    SExprIdentifier identifier => identifier.QualifiedName,
+                    SExprString str => str.Value,
+                    _ => throw new InvalidOperationException($"Object property key must be an identifier or string but found '{node}'."),
+                };
+            }
+
+            private static void EnsureOperandCount(SExprList list, int minimum, string form)
+            {
+                if (list.Elements.Length <= minimum)
+                {
+                    throw new InvalidOperationException($"({form} ...) expects at least {minimum} operand(s).");
+                }
+            }
+
+            private int EvaluateIntOperand(SExprNode node, Scope scope, InvocationContext invocation, IReadOnlyList<Value> arguments)
+            {
+                var value = Evaluate(node, scope, invocation, arguments);
+                return value switch
+                {
+                    IntValue number => number.Value,
+                    _ => throw new InvalidOperationException($"Expected int expression but found '{value.Type.Name}'."),
+                };
+            }
+
+            private string CoerceToString(Value value)
+            {
+                return value switch
+                {
+                    StringValue str => str.Value,
+                    IntValue number => number.Value.ToString(CultureInfo.InvariantCulture),
+                    BoolValue boolean => boolean.Value ? "true" : "false",
+                    AnyValue any when any.Value is string s => s,
+                    AnyValue any when any.Value is null => string.Empty,
+                    ListValue list => "[" + string.Join(" ", list.Elements.Select(CoerceToString)) + "]",
+                    MapValue map => "{" + string.Join(" ", map.Properties.Select(kvp => $"{kvp.Key}={CoerceToString(kvp.Value)}")) + "}",
+                    ObjectValue obj => $"<{obj.Class.Name}>",
+                    _ => throw new InvalidOperationException($"Cannot convert value of type '{value.Type.Name}' to string."),
+                };
+            }
+        }
+
+        private static IEnumerable<SExprNode> FlattenArgumentNodes(IEnumerable<SExprNode> nodes)
+        {
+            foreach (var node in nodes)
+            {
+                if (node is SExprArray array)
+                {
+                    foreach (var element in array.Elements)
+                    {
+                        yield return element;
+                    }
+
+                    continue;
+                }
+
+                yield return node;
+            }
         }
 
         private IEnumerable<ParameterSyntax> ParseParameters(SExprList section)
         {
-            foreach (var paramNode in section.Elements[1..])
+            foreach (var paramNode in FlattenArgumentNodes(section.Elements.Skip(1)))
             {
                 switch (paramNode)
                 {
