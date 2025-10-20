@@ -58,7 +58,7 @@ public sealed class TypeSystem
         var symbol = new ClassTypeSymbol(name, declared, baseRefs, isTrait, MroFactory, RowFactory);
         var definition = new ClassDefinition(symbol, methodBodies.ToImmutableArray());
         _classes[name] = definition;
-        _registry.Register(symbol.Rows);
+        _registry.RegisterLazy(symbol.Name + ".rows", () => symbol.Rows);
         return definition;
     }
 

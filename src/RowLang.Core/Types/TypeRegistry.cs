@@ -1,11 +1,13 @@
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Threading;
 
 namespace RowLang.Core.Types;
 
 public sealed class TypeRegistry
 {
-    private readonly ConcurrentDictionary<string, TypeSymbol> _types = new();
+    private readonly ConcurrentDictionary<string, Lazy<TypeSymbol>> _types = new();
     private readonly ConcurrentDictionary<string, EffectSymbol> _effects = new();
 
     public TypeRegistry()
@@ -17,15 +19,15 @@ public sealed class TypeRegistry
         Register(new NeverTypeSymbol());
     }
 
-    public TypeSymbol Any => _types["any"];
+    public TypeSymbol Any => _types["any"].Value;
 
-    public TypeSymbol Never => _types["never"];
+    public TypeSymbol Never => _types["never"].Value;
 
-    public PrimitiveTypeSymbol Int => (PrimitiveTypeSymbol)_types["int"];
+    public PrimitiveTypeSymbol Int => (PrimitiveTypeSymbol)_types["int"].Value;
 
-    public PrimitiveTypeSymbol String => (PrimitiveTypeSymbol)_types["str"];
+    public PrimitiveTypeSymbol String => (PrimitiveTypeSymbol)_types["str"].Value;
 
-    public PrimitiveTypeSymbol Bool => (PrimitiveTypeSymbol)_types["bool"];
+    public PrimitiveTypeSymbol Bool => (PrimitiveTypeSymbol)_types["bool"].Value;
 
     public EffectSymbol GetOrCreateEffect(string name)
     {
@@ -46,14 +48,19 @@ public sealed class TypeRegistry
 
     public void Register(TypeSymbol symbol)
     {
-        _types[symbol.Name] = symbol;
+        _types[symbol.Name] = new Lazy<TypeSymbol>(() => symbol, LazyThreadSafetyMode.ExecutionAndPublication);
+    }
+
+    public void RegisterLazy(string name, Func<TypeSymbol> factory)
+    {
+        _types[name] = new Lazy<TypeSymbol>(factory, LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
     public TypeSymbol Require(string name)
     {
         if (_types.TryGetValue(name, out var symbol))
         {
-            return symbol;
+            return symbol.Value;
         }
 
         throw new KeyNotFoundException($"Type '{name}' is not registered.");
