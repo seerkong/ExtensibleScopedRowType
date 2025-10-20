@@ -17,8 +17,9 @@ public static class RowTypeBuilder
 
         foreach (var ancestor in type.MethodResolutionOrder)
         {
-            foreach (var member in ancestor.DeclaredRows.Members)
+            foreach (var original in ancestor.DeclaredRows.Members)
             {
+                var member = ApplyEffectiveAccess(type, original);
                 var key = (member.Name, member.Origin);
                 if (existing.Contains(key))
                 {
@@ -105,4 +106,50 @@ public static class RowTypeBuilder
 
         return new RowTypeSymbol(type.Name + ".rows", members, type.DeclaredRows.IsOpen);
     }
+
+    private static RowMember ApplyEffectiveAccess(ClassTypeSymbol type, RowMember member)
+    {
+        var pathAccess = ComputeAccessModifier(type, member.Origin);
+        var effective = MinAccess(member.Access, pathAccess);
+        return member with { Access = effective };
+    }
+
+    private static AccessModifier ComputeAccessModifier(ClassTypeSymbol type, string ancestorName)
+    {
+        if (string.Equals(type.Name, ancestorName, StringComparison.Ordinal))
+        {
+            return AccessModifier.Public;
+        }
+
+        if (TryComputeAccess(type, ancestorName, out var access))
+        {
+            return access;
+        }
+
+        return AccessModifier.Public;
+    }
+
+    private static bool TryComputeAccess(ClassTypeSymbol type, string targetName, out AccessModifier access)
+    {
+        foreach (var baseRef in type.Bases)
+        {
+            if (string.Equals(baseRef.Type.Name, targetName, StringComparison.Ordinal))
+            {
+                access = baseRef.AccessModifier;
+                return true;
+            }
+
+            if (TryComputeAccess(baseRef.Type, targetName, out var downstream))
+            {
+                access = MinAccess(baseRef.AccessModifier, downstream);
+                return true;
+            }
+        }
+
+        access = AccessModifier.Public;
+        return false;
+    }
+
+    private static AccessModifier MinAccess(AccessModifier first, AccessModifier second)
+        => (AccessModifier)Math.Min((int)first, (int)second);
 }

@@ -16,4 +16,6 @@ public sealed record RowMember(
     public bool IsInherit => Qualifier == RowQualifier.Inherit;
 
     public bool ShouldForward => Qualifier is RowQualifier.Default or RowQualifier.Inherit or RowQualifier.Override;
+
+    public AccessModifier Access { get; init; } = AccessModifier.Public;
 }

@@ -6,13 +6,21 @@ public static class RowMemberBuilder
         string owner,
         string name,
         FunctionTypeSymbol signature,
-        RowQualifier qualifier = RowQualifier.Default)
-        => new(name, signature, qualifier, owner, IsMethod: true);
+        RowQualifier qualifier = RowQualifier.Default,
+        AccessModifier access = AccessModifier.Public)
+        => new(name, signature, qualifier, owner, IsMethod: true)
+        {
+            Access = access,
+        };
 
     public static RowMember Field(
         string owner,
         string name,
         TypeSymbol type,
-        RowQualifier qualifier = RowQualifier.Default)
-        => new(name, type, qualifier, owner, IsMethod: false);
+        RowQualifier qualifier = RowQualifier.Default,
+        AccessModifier access = AccessModifier.Public)
+        => new(name, type, qualifier, owner, IsMethod: false)
+        {
+            Access = access,
+        };
 }
