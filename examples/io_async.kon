@@ -11,4 +11,4 @@
         (let ((info { path = (const str "/tmp/data") tries = [1 2 3] })
                    (payload (concat (const str "Read ") info.path)))
           payload))))
-  (run File read))
+  (run File read (effects async)))
