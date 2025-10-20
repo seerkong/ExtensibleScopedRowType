@@ -359,7 +359,12 @@ public static class RowLangScript
         private Func<InvocationContext, IReadOnlyList<Value>, Value> CompileStringConst(SExprNode node, TypeSymbol returnType)
         {
             EnsureReturnCompatibility(returnType, _registry.String, "str");
-            var text = ExpectIdentifier(node, "string literal").QualifiedName;
+            var text = node switch
+            {
+                SExprIdentifier identifier => identifier.QualifiedName,
+                SExprString str => str.Value,
+                _ => throw new InvalidOperationException($"Expected string literal but found '{node}'."),
+            };
             var value = new StringValue(text);
             return (_, _) => value;
         }
