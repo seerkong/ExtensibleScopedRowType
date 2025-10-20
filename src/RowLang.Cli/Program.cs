@@ -3,27 +3,44 @@ using RowLang.Core.Scripting;
 
 if (args.Length == 0 || args[0] is "-h" or "--help")
 {
-    Console.WriteLine("Usage: rowlang <directory>");
-    Console.WriteLine("Compiles and executes run directives in KON modules found in the directory.");
+    Console.WriteLine("Usage: rowlang <path>");
+    Console.WriteLine("Provides <path> as either a .kon file or directory to execute run directives.");
     return;
 }
 
-var workspace = new DirectoryInfo(args[0]);
-if (!workspace.Exists)
+var targetPath = args[0];
+IReadOnlyList<FileInfo> konFiles;
+
+if (Directory.Exists(targetPath))
 {
-    Console.Error.WriteLine($"Directory '{workspace.FullName}' does not exist.");
+    var workspace = new DirectoryInfo(targetPath);
+    konFiles = workspace
+        .EnumerateFiles("*.kon", SearchOption.AllDirectories)
+        .OrderBy(static file => file.FullName, StringComparer.Ordinal)
+        .ToArray();
+}
+else if (File.Exists(targetPath))
+{
+    var file = new FileInfo(targetPath);
+    if (!string.Equals(file.Extension, ".kon", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.Error.WriteLine($"File '{file.FullName}' is not a .kon script.");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    konFiles = new[] { file };
+}
+else
+{
+    Console.Error.WriteLine($"Path '{targetPath}' does not exist.");
     Environment.ExitCode = 1;
     return;
 }
 
-var konFiles = workspace
-    .EnumerateFiles("*.kon", SearchOption.AllDirectories)
-    .OrderBy(static file => file.FullName, StringComparer.Ordinal)
-    .ToArray();
-
 if (konFiles.Length == 0)
 {
-    Console.Error.WriteLine($"No .kon files found under '{workspace.FullName}'.");
+    Console.Error.WriteLine($"No .kon files found under '{targetPath}'.");
     Environment.ExitCode = 1;
     return;
 }
