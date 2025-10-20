@@ -83,7 +83,7 @@ public class RowLangScriptTests
             (method identity
               (params value ~ int)
               (return int)
-              (body (const int 7)))))
+              (body value))))
         """;
 
         var module = RowLangScript.Compile(source);
@@ -100,6 +100,42 @@ public class RowLangScriptTests
         var context = module.CreateExecutionContext();
         var instance = context.Instantiate("Echo");
         var result = (IntValue)context.Invoke(instance, "identity", new IntValue(42));
-        Assert.Equal(7, result.Value);
+        Assert.Equal(42, result.Value);
+    }
+
+    [Fact]
+    public void MethodSupportsLetCallAndNewExpressions()
+    {
+        const string source = """
+        (module
+          (class Greeter
+            (open)
+            (method greet
+              (return str)
+              (body (const str hello))))
+          (class EnthusiasticGreeter
+            (open)
+            (bases (Greeter))
+            (method greet
+              (qualifier override)
+              (return str)
+              (body
+                (let ((base (call self Greeter::greet)))
+                  base))))
+          (class GreeterFactory
+            (open)
+            (method make
+              (return str)
+              (body
+                (let ((other (new EnthusiasticGreeter)))
+                  (call other greet))))))
+        """;
+
+        var module = RowLangScript.Compile(source);
+        var context = module.CreateExecutionContext();
+
+        var factory = context.Instantiate("GreeterFactory");
+        var result = (StringValue)context.Invoke(factory, "make");
+        Assert.Equal("hello", result.Value);
     }
 }
