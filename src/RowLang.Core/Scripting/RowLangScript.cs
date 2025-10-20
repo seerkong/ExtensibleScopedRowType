@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
+using System.Linq;
 using RowLang.Core.Syntax;
+using RowLang.Core.Runtime;
 using RowLang.Core.Types;
 
 namespace RowLang.Core.Scripting;
@@ -94,6 +97,9 @@ public static class RowLangScript
                 case "class":
                     DefineClass(list);
                     break;
+                case "row-type":
+                    DefineRowType(list);
+                    break;
                 default:
                     throw new InvalidOperationException($"Unknown top-level form '{head.QualifiedName}'.");
             }
@@ -160,6 +166,81 @@ public static class RowLangScript
             _typeSystem.DefineClass(className, members, isOpen, bases, methods, isTrait);
         }
 
+        private void DefineRowType(SExprList list)
+        {
+            if (list.Elements.Length < 2)
+            {
+                throw new InvalidOperationException("(row-type <name> ...) requires a name.");
+            }
+
+            var rowName = ExpectIdentifier(list.Elements[1], "row type name").QualifiedName;
+            var isOpen = true;
+            var baseRows = new List<RowTypeSymbol>();
+            var members = new List<RowMember>();
+
+            foreach (var clauseNode in list.Elements[2..])
+            {
+                if (clauseNode is not SExprList clause || clause.Elements.IsDefaultOrEmpty)
+                {
+                    throw new InvalidOperationException("Row type clause must be a non-empty list.");
+                }
+
+                var clauseHead = ExpectIdentifier(clause.Elements[0], "row type clause");
+                switch (clauseHead.QualifiedName)
+                {
+                    case "open":
+                        isOpen = true;
+                        break;
+                    case "closed":
+                    case "sealed":
+                        isOpen = false;
+                        break;
+                    case "extends":
+                        foreach (var entry in clause.Elements[1..])
+                        {
+                            var baseName = ExpectIdentifier(entry, "row type base").QualifiedName;
+                            var symbol = _registry.Require(baseName);
+                            if (symbol is not RowTypeSymbol row)
+                            {
+                                throw new InvalidOperationException($"Type '{baseName}' is not a row type.");
+                            }
+
+                            baseRows.Add(row);
+                            if (row.IsOpen)
+                            {
+                                isOpen = true;
+                            }
+                        }
+
+                        break;
+                    case "method":
+                        var methodSpec = ParseMethodSpecification(rowName, clause, allowBody: false);
+                        if (methodSpec.BodyNode is not null)
+                        {
+                            throw new InvalidOperationException($"Row type method '{methodSpec.Name}' cannot declare a body.");
+                        }
+
+                        members.Add(RowMemberBuilder.Method(rowName, methodSpec.Name, methodSpec.Signature, methodSpec.Qualifier));
+                        break;
+                    case "field":
+                        members.Add(ParseField(rowName, clause));
+                        break;
+                    default:
+                        throw new InvalidOperationException($"Unknown row type clause '{clauseHead.QualifiedName}'.");
+                }
+            }
+
+            var aggregated = new List<RowMember>();
+            foreach (var baseRow in baseRows)
+            {
+                aggregated.AddRange(baseRow.Members);
+            }
+
+            aggregated.AddRange(members);
+
+            _typeSystem.DefineRowType(rowName, aggregated, isOpen);
+        }
+
         private void ParseBases(SExprList clause, List<(string, InheritanceKind, AccessModifier)> bases)
         {
             foreach (var node in clause.Elements[1..])
@@ -207,13 +288,30 @@ public static class RowLangScript
 
         private MethodBody ParseMethod(string className, SExprList clause)
         {
-            if (clause.Elements.Length < 3)
+            var specification = ParseMethodSpecification(className, clause, allowBody: true);
+            if (specification.BodyNode is null)
             {
-                throw new InvalidOperationException("(method <name> ...) requires a body.");
+                throw new InvalidOperationException($"Method '{specification.Name}' is missing a body.");
+            }
+
+            var implementation = CompileBody(specification.BodyNode, specification.Signature.ReturnType);
+            return MethodBuilder.FromLambda(
+                specification.Owner,
+                specification.Name,
+                specification.Signature,
+                implementation,
+                specification.Qualifier);
+        }
+
+        private MethodSpecification ParseMethodSpecification(string owner, SExprList clause, bool allowBody)
+        {
+            if (clause.Elements.Length < 2)
+            {
+                throw new InvalidOperationException("(method <name> ...) requires a method name.");
             }
 
             var methodName = ExpectIdentifier(clause.Elements[1], "method name").QualifiedName;
-            var parameterTypes = new List<TypeSymbol>();
+            var parameters = new List<ParameterSyntax>();
             TypeSymbol? returnType = null;
             var effects = new List<EffectSymbol>();
             RowQualifier qualifier = RowQualifier.Default;
@@ -230,7 +328,7 @@ public static class RowLangScript
                 switch (sectionHead.QualifiedName)
                 {
                     case "params":
-                        ParseParameters(section, parameterTypes);
+                        parameters.AddRange(ParseParameters(section));
                         break;
                     case "return":
                         if (section.Elements.Length != 2)
@@ -257,6 +355,11 @@ public static class RowLangScript
                         qualifier = ParseQualifier(ExpectIdentifier(section.Elements[1], "qualifier"));
                         break;
                     case "body":
+                        if (!allowBody)
+                        {
+                            throw new InvalidOperationException("Row type methods cannot declare bodies.");
+                        }
+
                         if (section.Elements.Length != 2)
                         {
                             throw new InvalidOperationException("(body <expr>) expects exactly one expression.");
@@ -274,38 +377,61 @@ public static class RowLangScript
                 throw new InvalidOperationException($"Method '{methodName}' is missing a return type.");
             }
 
-            if (bodyNode is null)
-            {
-                throw new InvalidOperationException($"Method '{methodName}' is missing a body.");
-            }
-
             var signature = _registry.CreateFunctionType(
-                $"{className}::{methodName}",
-                parameterTypes,
+                $"{owner}::{methodName}",
+                parameters.Select(static p => p.Type),
                 returnType,
                 effects);
 
-            var implementation = CompileBody(bodyNode, returnType);
-            return MethodBuilder.FromLambda(className, methodName, signature, implementation, qualifier);
+            return new MethodSpecification(
+                owner,
+                methodName,
+                parameters.ToImmutableArray(),
+                signature,
+                qualifier,
+                bodyNode);
         }
 
-        private void ParseParameters(SExprList section, List<TypeSymbol> parameterTypes)
+        private sealed record ParameterSyntax(string? Name, TypeSymbol Type);
+
+        private sealed record MethodSpecification(
+            string Owner,
+            string Name,
+            ImmutableArray<ParameterSyntax> Parameters,
+            FunctionTypeSymbol Signature,
+            RowQualifier Qualifier,
+            SExprNode? BodyNode);
+
+        private IEnumerable<ParameterSyntax> ParseParameters(SExprList section)
         {
             foreach (var paramNode in section.Elements[1..])
             {
-                if (paramNode is SExprList pair)
+                switch (paramNode)
                 {
-                    if (pair.Elements.Length == 0)
+                    case SExprIdentifier identifier when identifier.TypeAnnotation is not null:
                     {
-                        throw new InvalidOperationException("Empty parameter specification.");
+                        var type = ResolveType(identifier.TypeAnnotation, "parameter type");
+                        yield return new ParameterSyntax(identifier.QualifiedName, type);
+                        break;
                     }
+                    case SExprList list when !list.Elements.IsDefaultOrEmpty:
+                    {
+                        var type = ResolveType(list.Elements[0], "parameter type");
+                        string? name = null;
+                        if (list.Elements.Length > 1)
+                        {
+                            name = ExpectIdentifier(list.Elements[1], "parameter name").QualifiedName;
+                        }
 
-                    var type = ResolveType(pair.Elements[0], "parameter type");
-                    parameterTypes.Add(type);
-                }
-                else
-                {
-                    parameterTypes.Add(ResolveType(paramNode, "parameter type"));
+                        yield return new ParameterSyntax(name, type);
+                        break;
+                    }
+                    default:
+                    {
+                        var type = ResolveType(paramNode, "parameter type");
+                        yield return new ParameterSyntax(null, type);
+                        break;
+                    }
                 }
             }
         }
@@ -319,6 +445,63 @@ public static class RowLangScript
                 "final" => RowQualifier.Final,
                 _ => throw new InvalidOperationException($"Unknown qualifier '{identifier.QualifiedName}'."),
             };
+
+        private RowMember ParseField(string owner, SExprList clause)
+        {
+            if (clause.Elements.Length < 2)
+            {
+                throw new InvalidOperationException("(field <name> ~ <type>) requires a member specification.");
+            }
+
+            var descriptor = clause.Elements[1];
+            string fieldName;
+            TypeSymbol fieldType;
+
+            switch (descriptor)
+            {
+                case SExprIdentifier identifier when identifier.TypeAnnotation is not null:
+                    fieldName = identifier.QualifiedName;
+                    fieldType = ResolveType(identifier.TypeAnnotation, "field type");
+                    break;
+                case SExprList list when !list.Elements.IsDefaultOrEmpty:
+                    fieldType = ResolveType(list.Elements[0], "field type");
+                    if (list.Elements.Length < 2)
+                    {
+                        throw new InvalidOperationException("Field name is required when using list specification.");
+                    }
+
+                    fieldName = ExpectIdentifier(list.Elements[1], "field name").QualifiedName;
+                    break;
+                default:
+                    throw new InvalidOperationException("Field specification must be a typed identifier or list.");
+            }
+
+            var qualifier = RowQualifier.Default;
+            foreach (var option in clause.Elements[2..])
+            {
+                if (option is not SExprList optionList || optionList.Elements.IsDefaultOrEmpty)
+                {
+                    throw new InvalidOperationException("Field option must be a non-empty list.");
+                }
+
+                var optionHead = ExpectIdentifier(optionList.Elements[0], "field option");
+                switch (optionHead.QualifiedName)
+                {
+                    case "qualifier":
+                        if (optionList.Elements.Length != 2)
+                        {
+                            throw new InvalidOperationException("(qualifier <name>) expects exactly one argument.");
+                        }
+
+                        qualifier = ParseQualifier(ExpectIdentifier(optionList.Elements[1], "qualifier"));
+                        break;
+                    default:
+                        throw new InvalidOperationException($"Unknown field option '{optionHead.QualifiedName}'.");
+                }
+            }
+
+            return RowMemberBuilder.Field(owner, fieldName, fieldType, qualifier);
+        }
 
         private Func<InvocationContext, IReadOnlyList<Value>, Value> CompileBody(SExprNode node, TypeSymbol returnType)
         {
