@@ -270,6 +270,16 @@ public static class RowLangScript
 
             foreach (var clauseNode in list.Elements[2..])
             {
+                if (clauseNode is SExprIdentifier identifier)
+                {
+                    if (TryParseRowSpread(identifier, baseRows, ref isOpen))
+                    {
+                        continue;
+                    }
+
+                    throw new InvalidOperationException($"Unexpected identifier '{identifier.QualifiedName}' in row-type '{rowName}'.");
+                }
+
                 if (clauseNode is not SExprList clause || clause.Elements.IsDefaultOrEmpty)
                 {
                     throw new InvalidOperationException("Row type clause must be a non-empty list.");
@@ -329,6 +339,41 @@ public static class RowLangScript
             aggregated.AddRange(members);
 
             _typeSystem.DefineRowType(rowName, aggregated, isOpen);
+        }
+
+        private bool TryParseRowSpread(SExprIdentifier identifier, List<RowTypeSymbol> baseRows, ref bool isOpen)
+        {
+            var name = identifier.QualifiedName;
+            if (!name.StartsWith("..", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var target = name[2..];
+            if (string.Equals(target, "never", StringComparison.Ordinal))
+            {
+                isOpen = false;
+                return true;
+            }
+
+            if (string.IsNullOrWhiteSpace(target))
+            {
+                throw new InvalidOperationException("Row spread must specify a target type, e.g. '..SomeRow'.");
+            }
+
+            var symbol = _registry.Require(target);
+            if (symbol is not RowTypeSymbol rowType)
+            {
+                throw new InvalidOperationException($"Row spread target '{target}' is not a row type.");
+            }
+
+            baseRows.Add(rowType);
+            if (rowType.IsOpen)
+            {
+                isOpen = true;
+            }
+
+            return true;
         }
 
         private void ParseBases(SExprList clause, List<(string, InheritanceKind, AccessModifier)> bases)

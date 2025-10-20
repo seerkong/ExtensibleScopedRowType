@@ -215,6 +215,9 @@ public class RowLangScriptTests
     {
         const string source = """
         (module
+          (row-type IoError
+            (method fail
+              (return str)))
           (class Reader
             (open)
             (method main
@@ -229,5 +232,29 @@ public class RowLangScriptTests
         var context = module.CreateExecutionContext();
         var run = Assert.Single(module.ExecuteRuns(context));
         Assert.Equal("data!", Assert.IsType<StringValue>(run.Result).Value);
+    }
+
+    [Fact]
+    public void RowTypeSupportsSpreadSyntax()
+    {
+        const string source = """
+        (module
+          (row-type IoError
+            (method fail
+              (return str)))
+          (row-type File
+            ..IoError
+            (method read
+              (return str))
+            ..never))
+        """;
+
+        var module = RowLangScript.Compile(source);
+        var registry = module.TypeSystem.Registry;
+        var fileRows = Assert.IsType<RowTypeSymbol>(registry.Require("File"));
+
+        Assert.False(fileRows.IsOpen);
+        Assert.Contains(fileRows.Members, m => m.Origin == "IoError" && m.Name == "fail");
+        Assert.Contains(fileRows.Members, m => m.Origin == "File" && m.Name == "read");
     }
 }
