@@ -1,0 +1,10 @@
+// Demonstrates map property access using dotted identifiers
+(module
+  (class Reader
+    (open)
+    (method main
+      (return str)
+      (body
+        (let ((info { message = (const str "Hello") target = (const str "Map") }))
+          (concat info.message (const str ", ") info.target)))) )
+  (run Reader main))
