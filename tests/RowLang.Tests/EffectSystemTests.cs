@@ -1,10 +1,7 @@
 using System;
-using RowLang.Core;
 using RowLang.Core.Runtime;
-using RowLang.Core.Types;
+using RowLang.Core.Scripting;
 using Xunit;
-
-using ExecutionContext = RowLang.Core.Runtime.ExecutionContext;
 
 namespace RowLang.Tests;
 
@@ -13,30 +10,20 @@ public class EffectSystemTests
     [Fact]
     public void EffectfulMethodRequiresScope()
     {
-        var typeSystem = new TypeSystem();
-        var registry = typeSystem.Registry;
-        var asyncEffect = registry.GetOrCreateEffect("async");
-        var signature = registry.CreateFunctionType(
-            "File::read",
-            Array.Empty<TypeSymbol>(),
-            registry.String,
-            new[] { asyncEffect });
+        const string script = """
+        (module
+          (effect async)
+          (class File
+            (open)
+            (method read
+              (return str)
+              (effects async)
+              (body (const str payload)))))
+        """;
 
-        typeSystem.DefineClass(
-            "File",
-            new[] { RowMemberBuilder.Method("File", "read", signature) },
-            isOpen: true,
-            bases: new[] { ("object", InheritanceKind.Real, AccessModifier.Public) },
-            methodBodies: new[]
-            {
-                MethodBuilder.FromLambda(
-                    "File",
-                    "read",
-                    signature,
-                    static (ctx, args) => new StringValue("payload"))
-            });
-
-        var context = new ExecutionContext(typeSystem);
+        var module = RowLangScript.Compile(script);
+        var context = module.CreateExecutionContext();
+        var asyncEffect = module.TypeSystem.Registry.GetOrCreateEffect("async");
         var instance = context.Instantiate("File");
 
         Assert.Throws<InvalidOperationException>(() =>
@@ -54,31 +41,22 @@ public class EffectSystemTests
     [Fact]
     public void NestedScopesAccumulateEffects()
     {
-        var typeSystem = new TypeSystem();
-        var registry = typeSystem.Registry;
-        var asyncEffect = registry.GetOrCreateEffect("async");
-        var ioEffect = registry.GetOrCreateEffect("IoError");
-        var signature = registry.CreateFunctionType(
-            "Worker::work",
-            Array.Empty<TypeSymbol>(),
-            registry.String,
-            new[] { asyncEffect, ioEffect });
+        const string script = """
+        (module
+          (effect async)
+          (effect IoError)
+          (class Worker
+            (open)
+            (method work
+              (return str)
+              (effects async IoError)
+              (body (const str ok)))))
+        """;
 
-        typeSystem.DefineClass(
-            "Worker",
-            new[] { RowMemberBuilder.Method("Worker", "work", signature) },
-            isOpen: true,
-            bases: new[] { ("object", InheritanceKind.Real, AccessModifier.Public) },
-            methodBodies: new[]
-            {
-                MethodBuilder.FromLambda(
-                    "Worker",
-                    "work",
-                    signature,
-                    static (ctx, args) => new StringValue("ok"))
-            });
-
-        var context = new ExecutionContext(typeSystem);
+        var module = RowLangScript.Compile(script);
+        var context = module.CreateExecutionContext();
+        var asyncEffect = module.TypeSystem.Registry.GetOrCreateEffect("async");
+        var ioEffect = module.TypeSystem.Registry.GetOrCreateEffect("IoError");
         var worker = context.Instantiate("Worker");
 
         Assert.Throws<InvalidOperationException>(() =>
