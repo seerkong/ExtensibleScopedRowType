@@ -34,6 +34,7 @@ public static class RowTypeBuilder
                 if (member.IsVirtual)
                 {
                     blockedByVirtual.Add(member.Name);
+                    RemoveExistingMembers(type, ancestor, members, existing, member.Name);
                     members.Add(member);
                     existing.Add(key);
                     overridesAwaitingBase.Remove(member.Name);
@@ -105,6 +106,39 @@ public static class RowTypeBuilder
         }
 
         return new RowTypeSymbol(type.Name + ".rows", members, type.DeclaredRows.IsOpen);
+    }
+
+    private static void RemoveExistingMembers(
+        ClassTypeSymbol targetType,
+        ClassTypeSymbol ancestor,
+        List<RowMember> members,
+        HashSet<(string Name, string Origin)> existing,
+        string name)
+    {
+        for (var i = members.Count - 1; i >= 0; i--)
+        {
+            var candidate = members[i];
+            if (!string.Equals(candidate.Name, name, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var originClass = targetType.MethodResolutionOrder.FirstOrDefault(t => string.Equals(t.Name, candidate.Origin, StringComparison.Ordinal));
+
+            var keep = string.Equals(candidate.Origin, targetType.Name, StringComparison.Ordinal);
+            if (!keep && originClass is not null && !ReferenceEquals(originClass, ancestor))
+            {
+                keep = originClass.MethodResolutionOrder.Contains(ancestor);
+            }
+
+            if (keep && !string.Equals(candidate.Origin, ancestor.Name, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            existing.Remove((candidate.Name, candidate.Origin));
+            members.RemoveAt(i);
+        }
     }
 
     private static RowMember ApplyEffectiveAccess(ClassTypeSymbol type, RowMember member)

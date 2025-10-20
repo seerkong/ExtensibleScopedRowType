@@ -191,6 +191,78 @@ public class RowTypeTests
     }
 
     [Fact]
+    public void VirtualMembersPruneEarlierRows()
+    {
+        var system = new TypeSystem();
+        var registry = system.Registry;
+
+        var signature = registry.CreateFunctionType("value", Array.Empty<TypeSymbol>(), registry.Int);
+
+        system.DefineClass(
+            "DefaultValue",
+            new[]
+            {
+                RowMemberBuilder.Method("DefaultValue", "value", signature),
+            },
+            isOpen: true,
+            bases: new[] { ("object", InheritanceKind.Real, AccessModifier.Public) },
+            methodBodies: new[]
+            {
+                MethodBuilder.FromLambda(
+                    "DefaultValue",
+                    "value",
+                    signature,
+                    static (_, _) => new IntValue(0))
+            },
+            isTrait: true);
+
+        system.DefineClass(
+            "Base",
+            new[]
+            {
+                RowMemberBuilder.Method("Base", "value", signature, RowQualifier.Virtual),
+            },
+            isOpen: true,
+            bases: new[] { ("object", InheritanceKind.Real, AccessModifier.Public) },
+            methodBodies: new[]
+            {
+                MethodBuilder.FromLambda(
+                    "Base",
+                    "value",
+                    signature,
+                    static (_, _) => new IntValue(1),
+                    RowQualifier.Virtual),
+            });
+
+        var derived = system.DefineClass(
+            "Derived",
+            new[]
+            {
+                RowMemberBuilder.Method("Derived", "value", signature, RowQualifier.Override),
+            },
+            isOpen: true,
+            bases: new[]
+            {
+                ("DefaultValue", InheritanceKind.Real, AccessModifier.Public),
+                ("Base", InheritanceKind.Real, AccessModifier.Public)
+            },
+            methodBodies: new[]
+            {
+                MethodBuilder.FromLambda(
+                    "Derived",
+                    "value",
+                    signature,
+                    static (_, _) => new IntValue(2),
+                    RowQualifier.Override),
+            });
+
+        var relevant = derived.Type.Rows.Members.Where(m => m.Name == "value").ToArray();
+        Assert.Contains(relevant, m => m.Origin == "Derived");
+        Assert.Contains(relevant, m => m.Origin == "Base" && m.IsVirtual);
+        Assert.DoesNotContain(relevant, m => m.Origin == "DefaultValue");
+    }
+
+    [Fact]
     public void FinalMembersCannotBeOverridden()
     {
         var system = new TypeSystem();
