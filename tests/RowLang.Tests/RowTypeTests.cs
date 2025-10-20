@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using RowLang.Core;
 using RowLang.Core.Runtime;
+using RuntimeExecutionContext = RowLang.Core.Runtime.ExecutionContext;
 using RowLang.Core.Types;
 using Xunit;
 
@@ -138,7 +139,7 @@ public class RowTypeTests
                     RowQualifier.Override)
             });
 
-        var context = new ExecutionContext(system);
+        var context = new RuntimeExecutionContext(system);
         var instance = context.Instantiate("B");
 
         var direct = (StringValue)context.Invoke(instance, "to_string");
@@ -179,7 +180,7 @@ public class RowTypeTests
             bases: new[] { ("Base", InheritanceKind.Real, AccessModifier.Public) },
             methodBodies: Array.Empty<MethodBody>());
 
-        var context = new ExecutionContext(system);
+        var context = new RuntimeExecutionContext(system);
         var instance = context.Instantiate("Derived");
 
         var result = (IntValue)context.Invoke(instance, "value");
