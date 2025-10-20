@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using RowLang.Core;
 using RowLang.Core.Runtime;
+using RowLang.Core.Scripting;
 using RuntimeExecutionContext = RowLang.Core.Runtime.ExecutionContext;
 using RowLang.Core.Types;
 
@@ -140,3 +141,36 @@ using (context.PushEffectScope(asyncEffect))
 }
 
 Console.WriteLine("\nDemo complete.");
+
+const string script = """
+(module
+  (effect async)
+  (class ScriptFile
+    (open)
+    (method read
+      (return str)
+      (effects async)
+      (body (const str script-data)))))
+""";
+
+Console.WriteLine("\nScript-based module demo:\n" + script + "\n");
+
+var module = RowLangScript.Compile(script);
+var scriptContext = module.CreateExecutionContext();
+var scriptEffect = module.TypeSystem.Registry.GetOrCreateEffect("async");
+var scriptInstance = scriptContext.Instantiate("ScriptFile");
+
+try
+{
+    scriptContext.Invoke(scriptInstance, "read");
+}
+catch (InvalidOperationException ex)
+{
+    Console.WriteLine($"  Without effect scope: {ex.Message}");
+}
+
+using (scriptContext.PushEffectScope(scriptEffect))
+{
+    var payload = (StringValue)scriptContext.Invoke(scriptInstance, "read");
+    Console.WriteLine($"  With async scope ScriptFile.read -> {payload.Value}");
+}
