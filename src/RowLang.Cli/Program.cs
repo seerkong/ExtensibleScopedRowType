@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using RowLang.Core;
 using RowLang.Core.Runtime;
+using RuntimeExecutionContext = RowLang.Core.Runtime.ExecutionContext;
 using RowLang.Core.Types;
 
 var typeSystem = new TypeSystem();
@@ -74,7 +75,7 @@ typeSystem.DefineClass(
             RowQualifier.Override)
     });
 
-var context = new ExecutionContext(typeSystem);
+var context = new RuntimeExecutionContext(typeSystem);
 var instance = context.Instantiate("B");
 var defaultCall = (StringValue)context.Invoke(instance, "to_string");
 var traitCall = (StringValue)context.Invoke(instance, "to_string", "ToString");
