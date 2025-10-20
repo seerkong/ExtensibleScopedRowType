@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
-using RowLang.Core.Runtime;
 using RowLang.Core.Syntax;
 using RowLang.Core.Types;
+using RuntimeExecutionContext = RowLang.Core.Runtime.ExecutionContext;
 
 namespace RowLang.Core.Scripting;
 
@@ -17,7 +17,7 @@ public sealed class RowLangModule
 
     public TypeSystem TypeSystem => _typeSystem;
 
-    public ExecutionContext CreateExecutionContext() => new(_typeSystem);
+    public RuntimeExecutionContext CreateExecutionContext() => new(_typeSystem);
 }
 
 public static class RowLangScript
