@@ -187,4 +187,26 @@ public class RowLangScriptTests
         Assert.Equal("Runner", run.Directive.ClassName);
         Assert.Equal(3, Assert.IsType<IntValue>(run.Result).Value);
     }
+
+    [Fact]
+    public void RunDirectiveAllowsEffects()
+    {
+        const string source = """
+        (module
+          (effect async)
+          (class Worker
+            (open)
+            (method work
+              (return str)
+              (effects async)
+              (body (const str done))))
+          (run Worker work (effects async)))
+        """;
+
+        var module = RowLangScript.Compile(source);
+        var context = module.CreateExecutionContext();
+
+        var run = Assert.Single(module.ExecuteRuns(context));
+        Assert.Equal("done", Assert.IsType<StringValue>(run.Result).Value);
+    }
 }

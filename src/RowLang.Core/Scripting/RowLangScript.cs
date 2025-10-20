@@ -30,16 +30,29 @@ public sealed class RowLangModule
     {
         foreach (var directive in RunDirectives)
         {
-            var instance = context.Instantiate(directive.ClassName);
-            Value result = directive.Origin is null
-                ? context.Invoke(instance, directive.MemberName)
-                : context.Invoke(instance, directive.MemberName, directive.Origin);
-            yield return (directive, result);
+            IDisposable? scope = null;
+            try
+            {
+                if (!directive.AllowedEffects.IsDefaultOrEmpty && directive.AllowedEffects.Length > 0)
+                {
+                    scope = context.PushEffectScope(directive.AllowedEffects);
+                }
+
+                var instance = context.Instantiate(directive.ClassName);
+                Value result = directive.Origin is null
+                    ? context.Invoke(instance, directive.MemberName)
+                    : context.Invoke(instance, directive.MemberName, directive.Origin);
+                yield return (directive, result);
+            }
+            finally
+            {
+                scope?.Dispose();
+            }
         }
     }
 }
 
-public sealed record RunDirective(string ClassName, string MemberName, string? Origin);
+public sealed record RunDirective(string ClassName, string MemberName, string? Origin, ImmutableArray<EffectSymbol> AllowedEffects);
 
 public static class RowLangScript
 {
@@ -143,9 +156,9 @@ public static class RowLangScript
 
         private void DefineRun(SExprList list)
         {
-            if (list.Elements.Length != 3)
+            if (list.Elements.Length < 3)
             {
-                throw new InvalidOperationException("(run <class> <member>) expects exactly two arguments.");
+                throw new InvalidOperationException("(run <class> <member> ...) requires at least two arguments.");
             }
 
             var classIdentifier = ExpectIdentifier(list.Elements[1], "run class");
@@ -165,7 +178,32 @@ public static class RowLangScript
                 ? null
                 : string.Join("::", memberIdentifier.Namespace);
 
-            _runs.Add(new RunDirective(classIdentifier.QualifiedName, memberIdentifier.Name, origin));
+            var effects = ImmutableArray.CreateBuilder<EffectSymbol>();
+
+            foreach (var sectionNode in list.Elements[3..])
+            {
+                if (sectionNode is not SExprList section || section.Elements.IsDefaultOrEmpty)
+                {
+                    throw new InvalidOperationException("Run option must be a non-empty list.");
+                }
+
+                var sectionHead = ExpectIdentifier(section.Elements[0], "run option");
+                switch (sectionHead.QualifiedName)
+                {
+                    case "effects":
+                        foreach (var effectNode in FlattenArgumentNodes(section.Elements.Skip(1)))
+                        {
+                            var effectName = ExpectIdentifier(effectNode, "run effect").QualifiedName;
+                            effects.Add(_registry.GetOrCreateEffect(effectName));
+                        }
+
+                        break;
+                    default:
+                        throw new InvalidOperationException($"Unknown run option '{sectionHead.QualifiedName}'.");
+                }
+            }
+
+            _runs.Add(new RunDirective(classIdentifier.QualifiedName, memberIdentifier.Name, origin, effects.ToImmutable()));
         }
 
         private void DefineClass(SExprList list)

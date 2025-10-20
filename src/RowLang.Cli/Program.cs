@@ -72,6 +72,10 @@ foreach (var file in konFiles)
     foreach (var (directive, result) in module.ExecuteRuns(context))
     {
         Console.WriteLine($"-> {directive.ClassName}.{directive.MemberName}() = {FormatValue(result)}");
+        if (result is StringValue stringValue)
+        {
+            Console.WriteLine(stringValue.Value);
+        }
     }
 }
 
