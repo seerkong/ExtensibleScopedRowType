@@ -215,9 +215,6 @@ public class RowLangScriptTests
     {
         const string source = """
         (module
-          (row-type IoError
-            (method fail
-              (return str)))
           (class Reader
             (open)
             (method main
@@ -256,5 +253,27 @@ public class RowLangScriptTests
         Assert.False(fileRows.IsOpen);
         Assert.Contains(fileRows.Members, m => m.Origin == "IoError" && m.Name == "fail");
         Assert.Contains(fileRows.Members, m => m.Origin == "File" && m.Name == "read");
+    }
+
+    [Fact]
+    public void SendFunctionDispatchesMethod()
+    {
+        const string source = """
+        (module
+          (class Greeter
+            (open)
+            (method greet
+              (return str)
+              (body (const str hello)))
+            (method shout
+              (return str)
+              (body ($ self greet))))
+          (run Greeter shout))
+        """;
+
+        var module = RowLangScript.Compile(source);
+        var context = module.CreateExecutionContext();
+        var result = Assert.Single(module.ExecuteRuns(context));
+        Assert.Equal("hello", Assert.IsType<StringValue>(result.Result).Value);
     }
 }
