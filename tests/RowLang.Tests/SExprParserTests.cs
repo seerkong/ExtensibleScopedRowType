@@ -36,7 +36,7 @@ public class SExprParserTests
     [Fact]
     public void ParsesArrayAndObject()
     {
-        const string source = "[1 2 \"3\"] {k1: 1 k2: 2 ABC::k3: [1] \"key4\": {}}";
+        const string source = "[1 2 \"3\"] {k1 = 1 k2 = 2 ABC::k3 = [1] \"key4\" = {}}";
         var parser = new SExprParser(source);
         var nodes = parser.Parse();
 
@@ -65,5 +65,38 @@ public class SExprParserTests
         var stringKey = Assert.IsType<SExprString>(obj.Properties[3].Key);
         Assert.Equal("key4", stringKey.Value);
         Assert.IsType<SExprObject>(obj.Properties[3].Value);
+    }
+
+    [Fact]
+    public void ParsesTypeAnnotatedIdentifier()
+    {
+        const string source = "value ~ (Map [str str])";
+        var parser = new SExprParser(source);
+        var nodes = parser.Parse();
+
+        var identifier = Assert.IsType<SExprIdentifier>(Assert.Single(nodes));
+        Assert.Equal("value", identifier.QualifiedName);
+
+        var annotation = Assert.IsType<SExprList>(identifier.TypeAnnotation);
+        Assert.Equal("Map", Assert.IsType<SExprIdentifier>(annotation.Elements[0]).QualifiedName);
+
+        var tuple = Assert.IsType<SExprArray>(annotation.Elements[1]);
+        Assert.Equal("str", Assert.IsType<SExprIdentifier>(tuple.Elements[0]).QualifiedName);
+        Assert.Equal("str", Assert.IsType<SExprIdentifier>(tuple.Elements[1]).QualifiedName);
+    }
+
+    [Fact]
+    public void PostfixAnnotationsRemainAfterTypeAnnotation()
+    {
+        const string source = "value ~ str ^meta";
+        var parser = new SExprParser(source);
+        var nodes = parser.Parse();
+
+        var identifier = Assert.IsType<SExprIdentifier>(Assert.Single(nodes));
+        Assert.Equal("value", identifier.QualifiedName);
+        Assert.Equal("str", Assert.IsType<SExprIdentifier>(identifier.TypeAnnotation).QualifiedName);
+
+        Assert.Single(identifier.PostfixAnnotations);
+        Assert.Equal("meta", Assert.IsType<SExprIdentifier>(identifier.PostfixAnnotations[0]).QualifiedName);
     }
 }

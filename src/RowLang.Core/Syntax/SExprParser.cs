@@ -29,7 +29,7 @@ public sealed class SExprParser
         return builder.ToImmutable();
     }
 
-    private SExprNode ParseAnnotatedNode()
+    private SExprNode ParseAnnotatedNode(bool allowTrailingAnnotations = true)
     {
         var prefixes = ImmutableArray.CreateBuilder<SExprNode>();
         while (_current.Kind == TokenKind.Bang)
@@ -41,10 +41,13 @@ public sealed class SExprParser
         var core = ParseCoreNode();
 
         var postfixes = ImmutableArray.CreateBuilder<SExprNode>();
-        while (_current.Kind == TokenKind.Caret)
+        if (allowTrailingAnnotations)
         {
-            NextToken();
-            postfixes.Add(ParseAnnotatedNode());
+            while (_current.Kind == TokenKind.Caret)
+            {
+                NextToken();
+                postfixes.Add(ParseAnnotatedNode(allowTrailingAnnotations: false));
+            }
         }
 
         if (prefixes.Count == 0 && postfixes.Count == 0)
@@ -54,8 +57,8 @@ public sealed class SExprParser
 
         return core with
         {
-            PrefixAnnotations = prefixes.ToImmutable(),
-            PostfixAnnotations = postfixes.ToImmutable(),
+            PrefixAnnotations = prefixes.Count == 0 ? core.PrefixAnnotations : prefixes.ToImmutable(),
+            PostfixAnnotations = postfixes.Count == 0 ? core.PostfixAnnotations : postfixes.ToImmutable(),
         };
     }
 
@@ -83,6 +86,14 @@ public sealed class SExprParser
         var immutable = parts.ToImmutableArray();
         var node = new SExprIdentifier(immutable);
         NextToken();
+
+        if (_current.Kind == TokenKind.Tilde)
+        {
+            NextToken();
+            var annotation = ParseAnnotatedNode(allowTrailingAnnotations: false);
+            node = node with { TypeAnnotation = annotation };
+        }
+
         return node;
     }
 
@@ -149,7 +160,7 @@ public sealed class SExprParser
             }
 
             var key = ParseAnnotatedNode();
-            Expect(TokenKind.Colon);
+            Expect(TokenKind.Equals);
             NextToken();
             var value = ParseAnnotatedNode();
             properties.Add(new SExprObjectProperty(key, value));
@@ -193,11 +204,17 @@ public sealed class SExprParser
             case ':':
                 _current = new Token(TokenKind.Colon, ":", _position++);
                 return;
+            case '=':
+                _current = new Token(TokenKind.Equals, "=", _position++);
+                return;
             case '!':
                 _current = new Token(TokenKind.Bang, "!", _position++);
                 return;
             case '^':
                 _current = new Token(TokenKind.Caret, "^", _position++);
+                return;
+            case '~':
+                _current = new Token(TokenKind.Tilde, "~", _position++);
                 return;
             case '"':
                 _current = ParseStringToken();
@@ -208,7 +225,7 @@ public sealed class SExprParser
         while (_position < _text.Length)
         {
             ch = _text[_position];
-            if (char.IsWhiteSpace(ch) || ch is '(' or ')' or '[' or ']' or '{' or '}' or '!' or '^' or '"')
+            if (char.IsWhiteSpace(ch) || ch is '(' or ')' or '[' or ']' or '{' or '}' or '!' or '^' or '"' or '=' or '~')
             {
                 break;
             }
@@ -314,8 +331,10 @@ public sealed class SExprParser
         Identifier,
         String,
         Colon,
+        Equals,
         Bang,
         Caret,
+        Tilde,
         EndOfFile,
     }
 }
