@@ -21,7 +21,27 @@ public sealed record SExprIdentifier(ImmutableArray<string> Parts) : SExprNode
     public override string ToString() => QualifiedName;
 }
 
+public sealed record SExprString(string Value) : SExprNode
+{
+    public override string ToString() => $"\"{Value.Replace("\\", "\\\\").Replace("\"", "\\\"")}\"";
+}
+
 public sealed record SExprList(ImmutableArray<SExprNode> Elements) : SExprNode
 {
     public override string ToString() => $"({string.Join(' ', Elements)})";
+}
+
+public sealed record SExprArray(ImmutableArray<SExprNode> Elements) : SExprNode
+{
+    public override string ToString() => $"[{string.Join(' ', Elements)}]";
+}
+
+public sealed record SExprObjectProperty(SExprNode Key, SExprNode Value)
+{
+    public override string ToString() => $"{Key}: {Value}";
+}
+
+public sealed record SExprObject(ImmutableArray<SExprObjectProperty> Properties) : SExprNode
+{
+    public override string ToString() => $"{{{string.Join(' ', Properties)}}}";
 }
