@@ -4,6 +4,8 @@ using RowLang.Core.Runtime;
 using RowLang.Core.Types;
 using Xunit;
 
+using ExecutionContext = RowLang.Core.Runtime.ExecutionContext;
+
 namespace RowLang.Tests;
 
 public class EffectSystemTests
@@ -37,7 +39,10 @@ public class EffectSystemTests
         var context = new ExecutionContext(typeSystem);
         var instance = context.Instantiate("File");
 
-        Assert.Throws<InvalidOperationException>(() => context.Invoke(instance, "read"));
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            context.Invoke(instance, "read");
+        });
 
         using (context.PushEffectScope(asyncEffect))
         {
@@ -76,11 +81,17 @@ public class EffectSystemTests
         var context = new ExecutionContext(typeSystem);
         var worker = context.Instantiate("Worker");
 
-        Assert.Throws<InvalidOperationException>(() => context.Invoke(worker, "work"));
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            context.Invoke(worker, "work");
+        });
 
         using (context.PushEffectScope(asyncEffect))
         {
-            Assert.Throws<InvalidOperationException>(() => context.Invoke(worker, "work"));
+            Assert.Throws<InvalidOperationException>(() =>
+            {
+                context.Invoke(worker, "work");
+            });
 
             using (context.PushEffectScope(ioEffect))
             {
