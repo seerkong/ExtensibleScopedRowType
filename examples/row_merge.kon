@@ -1,22 +1,40 @@
-// Demonstrates row spread and origin-aware member lookup
+// Demonstrates row merging, typed classes, extends annotations, and host dispatch
 (module
   (row-type T1
-    (method a (return int))
-    (method b (return str)))
+    (method b
+      (return str)))
   (row-type T2
-    (method b (return int))
-    (method c (return bool)))
+    (method b
+      (return int)))
   (row-type T3
     ..T1
     ..T2
     ..never)
-  (class Demo
+
+  (class T1Impl ~ T1
     (open)
-    (method call_b_from_T1
+    (method b
       (return str)
-      (body (const str one)))
-    (method call_b_from_T2
+      (body (const str "B from T1"))))
+
+  (class T2Impl ~ T2
+    (open)
+    (method b
       (return int)
-      (body (const int 2))))
+      (body (const int 7))))
+
+  (class Demo ~ T3 ^(extends T1Impl T2Impl)
+    (open)
+    (method call_b_from_T1 ~ T1::b
+      (T1Impl::b this))
+    (method call_b_from_T2 ~ T2::b
+      (T2Impl::b this))
+    (method call_b_via_send
+      (return str)
+      (body
+        (let ((value ($ this call_b_from_T1)))
+          (concat value (const str " via $"))))))
+
   (run Demo call_b_from_T1)
-  (run Demo call_b_from_T2))
+  (run Demo call_b_from_T2)
+  (run Demo call_b_via_send))

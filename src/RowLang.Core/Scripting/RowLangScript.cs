@@ -206,6 +206,50 @@ public static class RowLangScript
             _runs.Add(new RunDirective(classIdentifier.QualifiedName, memberIdentifier.Name, origin, effects.ToImmutable()));
         }
 
+        private (string Name, string? DeclaredRowType, List<(string Name, InheritanceKind Inheritance, AccessModifier Access)> Bases) ParseClassHeader(SExprNode node)
+        {
+            var identifier = ExpectIdentifier(node, "class name", allowAnnotations: true);
+            string? declaredRowTypeName = null;
+            if (identifier.TypeAnnotation is not null)
+            {
+                declaredRowTypeName = ExpectIdentifier(identifier.TypeAnnotation, "class row type", allowAnnotations: true).QualifiedName;
+            }
+
+            var bases = new List<(string Name, InheritanceKind Inheritance, AccessModifier Access)>();
+            foreach (var annotation in identifier.PostfixAnnotations)
+            {
+                if (annotation is not SExprList list || list.Elements.IsDefaultOrEmpty)
+                {
+                    throw new InvalidOperationException("Class annotation must be a non-empty list.");
+                }
+
+                var head = ExpectIdentifier(list.Elements[0], "class annotation");
+                switch (head.QualifiedName)
+                {
+                    case "extends":
+                        foreach (var entry in list.Elements[1..])
+                        {
+                            var baseName = ExpectIdentifier(entry, "base class name").QualifiedName;
+                            bases.Add((baseName, InheritanceKind.Real, AccessModifier.Public));
+                        }
+
+                        break;
+                    default:
+                        throw new InvalidOperationException($"Unknown class annotation '{head.QualifiedName}'.");
+                }
+            }
+
+            return (identifier.QualifiedName, declaredRowTypeName, bases);
+        }
+
+        private static void EnsureDefaultBase(List<(string Name, InheritanceKind Inheritance, AccessModifier Access)> bases)
+        {
+            if (bases.Count == 0)
+            {
+                bases.Add(("object", InheritanceKind.Real, AccessModifier.Public));
+            }
+        }
+
         private void DefineClass(SExprList list)
         {
             if (list.Elements.Length < 2)
@@ -213,10 +257,10 @@ public static class RowLangScript
                 throw new InvalidOperationException("(class <name> ...) requires a class name.");
             }
 
-            var className = ExpectIdentifier(list.Elements[1], "class name").QualifiedName;
+            var (className, declaredRowTypeName, annotatedBases) = ParseClassHeader(list.Elements[1]);
             var isOpen = true;
             var isTrait = false;
-            var bases = new List<(string Name, InheritanceKind Inheritance, AccessModifier Access)>();
+            var bases = new List<(string Name, InheritanceKind Inheritance, AccessModifier Access)>(annotatedBases);
             var members = new List<RowMember>();
             var methods = new List<MethodBody>();
 
@@ -253,7 +297,21 @@ public static class RowLangScript
                 }
             }
 
-            _typeSystem.DefineClass(className, members, isOpen, bases, methods, isTrait);
+            EnsureDefaultBase(bases);
+            var definition = _typeSystem.DefineClass(className, members, isOpen, bases, methods, isTrait);
+
+            if (declaredRowTypeName is not null)
+            {
+                if (_registry.Require(declaredRowTypeName) is not RowTypeSymbol expectedRow)
+                {
+                    throw new InvalidOperationException($"Type '{declaredRowTypeName}' is not a row type.");
+                }
+
+                if (!_typeSystem.IsSubtype(definition.Type.Rows, expectedRow))
+                {
+                    throw new InvalidOperationException($"Class '{className}' does not satisfy declared row type '{declaredRowTypeName}'.");
+                }
+            }
         }
 
         private void DefineRowType(SExprList list)
@@ -445,7 +503,22 @@ public static class RowLangScript
                 throw new InvalidOperationException("(method <name> ...) requires a method name.");
             }
 
-            var methodName = ExpectIdentifier(clause.Elements[1], "method name").QualifiedName;
+            var methodIdentifier = ExpectIdentifier(clause.Elements[1], "method name", allowAnnotations: true);
+            var methodName = methodIdentifier.QualifiedName;
+            RowMemberReference? rowReference = null;
+            if (methodIdentifier.TypeAnnotation is not null)
+            {
+                var annotationIdentifier = ExpectIdentifier(methodIdentifier.TypeAnnotation, "method row reference", allowAnnotations: true);
+                if (annotationIdentifier.Parts.Length < 2)
+                {
+                    throw new InvalidOperationException($"Row reference '{annotationIdentifier.QualifiedName}' must include an origin and member name.");
+                }
+
+                var rowTypeName = string.Join("::", annotationIdentifier.Parts[..^1]);
+                var memberName = annotationIdentifier.Parts[^1];
+                rowReference = new RowMemberReference(rowTypeName, memberName);
+            }
+
             var parameters = new List<ParameterSyntax>();
             TypeSymbol? returnType = null;
             var effects = new List<EffectSymbol>();
@@ -456,6 +529,12 @@ public static class RowLangScript
             {
                 if (element is not SExprList section || section.Elements.IsDefaultOrEmpty)
                 {
+                    if (bodyNode is null)
+                    {
+                        bodyNode = element;
+                        continue;
+                    }
+
                     throw new InvalidOperationException("Method section must be a non-empty list.");
                 }
 
@@ -499,11 +578,62 @@ public static class RowLangScript
                         {
                             throw new InvalidOperationException("(body <expr>) expects exactly one expression.");
                         }
-
                         bodyNode = section.Elements[1];
                         break;
                     default:
+                        if (bodyNode is null && allowBody)
+                        {
+                            bodyNode = element;
+                            break;
+                        }
+
                         throw new InvalidOperationException($"Unknown method section '{sectionHead.QualifiedName}'.");
+                }
+            }
+
+            if (returnType is null)
+            {
+                if (rowReference is null)
+                {
+                    throw new InvalidOperationException($"Method '{methodName}' is missing a return type.");
+                }
+            }
+
+            FunctionTypeSymbol? referencedSignature = null;
+            if (rowReference is RowMemberReference reference)
+            {
+                var member = ResolveRowMember(reference);
+                if (member.Type is not FunctionTypeSymbol function)
+                {
+                    throw new InvalidOperationException($"Row member '{reference.RowTypeName}::{reference.MemberName}' is not a method.");
+                }
+
+                referencedSignature = function;
+                if (returnType is null)
+                {
+                    returnType = function.ReturnType;
+                }
+                else
+                {
+                    EnsureReturnCompatibility(returnType, function.ReturnType, "row reference return type");
+                }
+
+                if (parameters.Count == 0)
+                {
+                    parameters.AddRange(function.Parameters.Select(type => new ParameterSyntax(null, type)));
+                }
+                else
+                {
+                    EnsureParameterListCompatibility(parameters, function);
+                }
+
+                if (effects.Count == 0 && !function.Effects.IsDefaultOrEmpty)
+                {
+                    effects.AddRange(function.Effects);
+                }
+                else if (!function.Effects.IsDefaultOrEmpty && !EffectsMatch(effects, function))
+                {
+                    throw new InvalidOperationException($"Method '{methodName}' effect list does not match row reference '{reference.RowTypeName}::{reference.MemberName}'.");
                 }
             }
 
@@ -518,13 +648,127 @@ public static class RowLangScript
                 returnType,
                 effects);
 
+            if (referencedSignature is not null)
+            {
+                EnsureSignatureCompatibility(signature, referencedSignature, methodName);
+            }
+
             return new MethodSpecification(
                 owner,
                 methodName,
                 parameters.ToImmutableArray(),
                 signature,
                 qualifier,
-                bodyNode);
+                bodyNode,
+                rowReference);
+        }
+
+        private RowMember ResolveRowMember(RowMemberReference reference)
+        {
+            var typeSymbol = _registry.Require(reference.RowTypeName);
+            if (typeSymbol is not RowTypeSymbol rowType)
+            {
+                throw new InvalidOperationException($"Row type '{reference.RowTypeName}' is not defined.");
+            }
+
+            var member = rowType.Members.FirstOrDefault(
+                m => string.Equals(m.Name, reference.MemberName, StringComparison.Ordinal)
+                     && string.Equals(m.Origin, reference.RowTypeName, StringComparison.Ordinal));
+
+            if (member is null)
+            {
+                member = rowType.Members.FirstOrDefault(
+                    m => string.Equals(m.Name, reference.MemberName, StringComparison.Ordinal));
+            }
+
+            if (member is null)
+            {
+                throw new InvalidOperationException($"Row member '{reference.RowTypeName}::{reference.MemberName}' does not exist.");
+            }
+
+            return member;
+        }
+
+        private static void EnsureParameterListCompatibility(List<ParameterSyntax> parameters, FunctionTypeSymbol reference)
+        {
+            if (parameters.Count != reference.Parameters.Length)
+            {
+                throw new InvalidOperationException("Parameter list does not match referenced row member signature.");
+            }
+
+            for (var i = 0; i < parameters.Count; i++)
+            {
+                var declared = parameters[i].Type;
+                var required = reference.Parameters[i];
+                if (ReferenceEquals(declared, required))
+                {
+                    continue;
+                }
+
+                if (string.Equals(declared.Name, required.Name, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (!string.Equals(declared.Name, "any", StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("Parameter type does not match referenced row member signature.");
+                }
+            }
+        }
+
+        private static bool EffectsMatch(List<EffectSymbol> effects, FunctionTypeSymbol reference)
+        {
+            if (effects.Count != reference.Effects.Length)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < effects.Count; i++)
+            {
+                if (!string.Equals(effects[i].Name, reference.Effects[i].Name, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static void EnsureSignatureCompatibility(FunctionTypeSymbol candidate, FunctionTypeSymbol reference, string methodName)
+        {
+            if (candidate.Parameters.Length != reference.Parameters.Length)
+            {
+                throw new InvalidOperationException($"Method '{methodName}' signature does not match referenced row member.");
+            }
+
+            for (var i = 0; i < candidate.Parameters.Length; i++)
+            {
+                if (!ReferenceEquals(candidate.Parameters[i], reference.Parameters[i])
+                    && !string.Equals(candidate.Parameters[i].Name, reference.Parameters[i].Name, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException($"Method '{methodName}' parameter types do not match referenced row member.");
+                }
+            }
+
+            if (!ReferenceEquals(candidate.ReturnType, reference.ReturnType)
+                && !string.Equals(candidate.ReturnType.Name, reference.ReturnType.Name, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"Method '{methodName}' return type does not match referenced row member.");
+            }
+
+            if (candidate.Effects.Length != reference.Effects.Length)
+            {
+                throw new InvalidOperationException($"Method '{methodName}' effect list does not match referenced row member.");
+            }
+
+            for (var i = 0; i < candidate.Effects.Length; i++)
+            {
+                if (!string.Equals(candidate.Effects[i].Name, reference.Effects[i].Name, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException($"Method '{methodName}' effect list does not match referenced row member.");
+                }
+            }
         }
 
         private sealed record ParameterSyntax(string? Name, TypeSymbol Type);
@@ -535,7 +779,10 @@ public static class RowLangScript
             ImmutableArray<ParameterSyntax> Parameters,
             FunctionTypeSymbol Signature,
             RowQualifier Qualifier,
-            SExprNode? BodyNode);
+            SExprNode? BodyNode,
+            RowMemberReference? RowReference);
+
+        private sealed record RowMemberReference(string RowTypeName, string MemberName);
 
         private sealed class Scope
         {
@@ -633,11 +880,10 @@ public static class RowLangScript
                     return EvaluateDottedIdentifier(name, scope, invocation);
                 }
 
-                if (string.Equals(name, "self", StringComparison.Ordinal))
+                if (string.Equals(name, "self", StringComparison.Ordinal) || string.Equals(name, "this", StringComparison.Ordinal))
                 {
                     return invocation.Self ?? throw new InvalidOperationException("Method invoked without a self instance.");
                 }
-
                 if (string.Equals(name, "true", StringComparison.Ordinal))
                 {
                     return new BoolValue(true);
@@ -692,19 +938,36 @@ public static class RowLangScript
                 }
 
                 var head = ModuleBuilder.ExpectIdentifier(list.Elements[0], "expression head");
-                return head.QualifiedName switch
+                switch (head.QualifiedName)
                 {
-                    "const" => EvaluateConst(list),
-                    "let" => EvaluateLet(list, scope, invocation, arguments),
-                    "call" => EvaluateCall(list, scope, invocation, arguments),
-                    "new" => EvaluateNew(list, invocation),
-                    "+" => EvaluateAddition(list, scope, invocation, arguments),
-                    "-" => EvaluateSubtraction(list, scope, invocation, arguments),
-                    "*" => EvaluateMultiplication(list, scope, invocation, arguments),
-                    "/" => EvaluateDivision(list, scope, invocation, arguments),
-                    "concat" => EvaluateConcat(list, scope, invocation, arguments),
-                    _ => throw new InvalidOperationException($"Unknown expression form '{head.QualifiedName}'."),
-                };
+                    case "const":
+                        return EvaluateConst(list);
+                    case "let":
+                        return EvaluateLet(list, scope, invocation, arguments);
+                    case "call":
+                        return EvaluateCall(list, scope, invocation, arguments);
+                    case "new":
+                        return EvaluateNew(list, invocation);
+                    case "+":
+                        return EvaluateAddition(list, scope, invocation, arguments);
+                    case "-":
+                        return EvaluateSubtraction(list, scope, invocation, arguments);
+                    case "*":
+                        return EvaluateMultiplication(list, scope, invocation, arguments);
+                    case "/":
+                        return EvaluateDivision(list, scope, invocation, arguments);
+                    case "concat":
+                        return EvaluateConcat(list, scope, invocation, arguments);
+                    case "$":
+                        return EvaluateSend(list, scope, invocation, arguments);
+                }
+
+                if (!head.Namespace.IsDefaultOrEmpty)
+                {
+                    return EvaluateQualifiedInvocation(list, head, scope, invocation, arguments);
+                }
+
+                throw new InvalidOperationException($"Unknown expression form '{head.QualifiedName}'.");
             }
 
             private Value EvaluateConst(SExprList list)
@@ -822,6 +1085,34 @@ public static class RowLangScript
                     : invocation.Execution.Invoke(instance, memberName, origin, evaluatedArgs);
             }
 
+            private Value EvaluateSend(SExprList list, Scope scope, InvocationContext invocation, IReadOnlyList<Value> arguments)
+            {
+                if (list.Elements.Length < 3)
+                {
+                    throw new InvalidOperationException("($ <target> <member> ...) requires at least a target and member.");
+                }
+
+                var target = Evaluate(list.Elements[1], scope, invocation, arguments);
+                if (target is not ObjectValue instance)
+                {
+                    throw new InvalidOperationException("Send target must evaluate to an object.");
+                }
+
+                var member = ModuleBuilder.ExpectIdentifier(list.Elements[2], "member name", allowAnnotations: true);
+                var origin = member.Namespace.IsDefaultOrEmpty ? null : string.Join("::", member.Namespace);
+                var memberName = member.Name;
+
+                var evaluatedArgs = new Value[list.Elements.Length - 3];
+                for (var i = 3; i < list.Elements.Length; i++)
+                {
+                    evaluatedArgs[i - 3] = Evaluate(list.Elements[i], scope, invocation, arguments);
+                }
+
+                return origin is null
+                    ? invocation.Execution.Invoke(instance, memberName, evaluatedArgs)
+                    : invocation.Execution.Invoke(instance, memberName, origin, evaluatedArgs);
+            }
+
             private Value EvaluateNew(SExprList list, InvocationContext invocation)
             {
                 if (list.Elements.Length != 2)
@@ -857,6 +1148,35 @@ public static class RowLangScript
                 }
 
                 return new MapValue(builder.ToImmutable());
+            }
+
+            private Value EvaluateQualifiedInvocation(
+                SExprList list,
+                SExprIdentifier head,
+                Scope scope,
+                InvocationContext invocation,
+                IReadOnlyList<Value> arguments)
+            {
+                if (list.Elements.Length < 2)
+                {
+                    throw new InvalidOperationException("Qualified invocation requires a target expression.");
+                }
+
+                var target = Evaluate(list.Elements[1], scope, invocation, arguments);
+                if (target is not ObjectValue instance)
+                {
+                    throw new InvalidOperationException("Qualified invocation target must evaluate to an object.");
+                }
+
+                var origin = string.Join("::", head.Namespace);
+                var memberName = head.Name;
+                var evaluatedArgs = new Value[list.Elements.Length - 2];
+                for (var i = 2; i < list.Elements.Length; i++)
+                {
+                    evaluatedArgs[i - 2] = Evaluate(list.Elements[i], scope, invocation, arguments);
+                }
+
+                return invocation.Execution.Invoke(instance, memberName, origin, evaluatedArgs);
             }
 
             private Value EvaluateAddition(SExprList list, Scope scope, InvocationContext invocation, IReadOnlyList<Value> arguments)
@@ -1132,16 +1452,21 @@ public static class RowLangScript
             return _registry.Require(identifier.QualifiedName);
         }
 
-        private static SExprIdentifier ExpectIdentifier(SExprNode node, string description)
+        private static SExprIdentifier ExpectIdentifier(SExprNode node, string description, bool allowAnnotations = false)
         {
             if (node is not SExprIdentifier identifier)
             {
                 throw new InvalidOperationException($"Expected identifier for {description} but found '{node}'.");
             }
 
-            if (identifier.PrefixAnnotations.Count > 0 || identifier.PostfixAnnotations.Count > 0)
+            if (!allowAnnotations)
             {
-                throw new InvalidOperationException($"Annotations are not supported on identifier '{identifier.QualifiedName}'.");
+                if (identifier.TypeAnnotation is not null
+                    || identifier.PrefixAnnotations.Count > 0
+                    || identifier.PostfixAnnotations.Count > 0)
+                {
+                    throw new InvalidOperationException($"Annotations are not supported on identifier '{identifier.QualifiedName}'.");
+                }
             }
 
             return identifier;
