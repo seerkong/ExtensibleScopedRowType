@@ -89,4 +89,43 @@ Console.WriteLine($"  A::to_string(B) -> {baseCall.Value}");
 Console.WriteLine("\nMethod resolution order for class B:");
 Console.WriteLine(string.Join(" -> ", typeSystem.RequireClassSymbol("B").MethodResolutionOrder.Select(t => t.Name)));
 
+var asyncEffect = registry.GetOrCreateEffect("async");
+var fileReadSignature = registry.CreateFunctionType(
+    "File::read",
+    Array.Empty<TypeSymbol>(),
+    registry.String,
+    new[] { asyncEffect });
+
+typeSystem.DefineClass(
+    "File",
+    new[] { RowMemberBuilder.Method("File", "read", fileReadSignature) },
+    isOpen: true,
+    bases: new[] { ("object", InheritanceKind.Real, AccessModifier.Public) },
+    methodBodies: new[]
+    {
+        MethodBuilder.FromLambda(
+            "File",
+            "read",
+            fileReadSignature,
+            static (ctx, args) => new StringValue("file-data"))
+    });
+
+var fileInstance = context.Instantiate("File");
+
+Console.WriteLine("\nEffect system demo:");
+try
+{
+    context.Invoke(fileInstance, "read");
+}
+catch (InvalidOperationException ex)
+{
+    Console.WriteLine($"  Calling File.read without async effect fails: {ex.Message}");
+}
+
+using (context.PushEffectScope(asyncEffect))
+{
+    var data = (StringValue)context.Invoke(fileInstance, "read");
+    Console.WriteLine($"  Within async scope File.read -> {data.Value}");
+}
+
 Console.WriteLine("\nDemo complete.");

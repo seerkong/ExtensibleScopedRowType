@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using RowLang.Core.Types;
 
@@ -9,6 +11,7 @@ public sealed class ExecutionContext
 {
     private readonly TypeSystem _typeSystem;
     private readonly ConcurrentDictionary<string, Value> _globals = new();
+    private readonly Stack<ImmutableHashSet<EffectSymbol>> _effectScopes = new();
 
     public ExecutionContext(TypeSystem typeSystem)
     {
@@ -27,6 +30,63 @@ public sealed class ExecutionContext
     public void SetGlobal(string name, Value value)
     {
         _globals[name] = value;
+    }
+
+    public IDisposable PushEffectScope(params EffectSymbol[] allowed)
+        => PushEffectScope((IEnumerable<EffectSymbol>)allowed);
+
+    public IDisposable PushEffectScope(IEnumerable<EffectSymbol> allowed)
+    {
+        var scope = allowed.ToImmutableHashSet();
+        _effectScopes.Push(scope);
+        return new EffectScope(this, scope);
+    }
+
+    private void PopEffectScope(ImmutableHashSet<EffectSymbol> scope)
+    {
+        if (_effectScopes.Count == 0)
+        {
+            throw new InvalidOperationException("Effect scope underflow.");
+        }
+
+        var current = _effectScopes.Pop();
+        if (!current.SetEquals(scope))
+        {
+            throw new InvalidOperationException("Effect scope imbalance detected.");
+        }
+    }
+
+    private ImmutableHashSet<EffectSymbol> GetAllowedEffects()
+    {
+        if (_effectScopes.Count == 0)
+        {
+            return ImmutableHashSet<EffectSymbol>.Empty;
+        }
+
+        var builder = ImmutableHashSet.CreateBuilder<EffectSymbol>();
+        foreach (var scope in _effectScopes)
+        {
+            builder.UnionWith(scope);
+        }
+
+        return builder.ToImmutable();
+    }
+
+    private void EnsureEffectsAllowed(FunctionTypeSymbol signature)
+    {
+        if (signature.Effects.IsDefaultOrEmpty)
+        {
+            return;
+        }
+
+        var allowed = GetAllowedEffects();
+        foreach (var effect in signature.Effects)
+        {
+            if (!allowed.Contains(effect))
+            {
+                throw new InvalidOperationException($"Effect '{effect.Name}' required by '{signature.Name}' is not permitted in the current scope.");
+            }
+        }
     }
 
     public ObjectValue Instantiate(string className)
@@ -176,7 +236,9 @@ public sealed class ExecutionContext
                 continue;
             }
 
-            return implementation.Function.Body(new InvocationContext(this, instance), arguments);
+            var function = implementation.Function;
+            EnsureEffectsAllowed(function.Signature);
+            return function.Body(new InvocationContext(this, instance), arguments);
         }
 
         if (origin is null && implementations.Any(m => m.Member.IsVirtual))
@@ -185,5 +247,29 @@ public sealed class ExecutionContext
         }
 
         throw new InvalidOperationException($"No matching member '{memberName}' found for origin '{origin ?? "<default>"}'.");
+    }
+
+    private sealed class EffectScope : IDisposable
+    {
+        private readonly ExecutionContext _context;
+        private readonly ImmutableHashSet<EffectSymbol> _scope;
+        private bool _disposed;
+
+        public EffectScope(ExecutionContext context, ImmutableHashSet<EffectSymbol> scope)
+        {
+            _context = context;
+            _scope = scope;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            _context.PopEffectScope(_scope);
+        }
     }
 }
