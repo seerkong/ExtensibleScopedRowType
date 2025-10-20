@@ -42,7 +42,7 @@ public sealed class TypeSystem
                 throw new InvalidOperationException($"Base type '{entry.Name}' is not defined.");
             }
 
-            baseRefs.Add(new BaseTypeReference(baseType, entry.Inheritance, entry.Access));
+            baseRefs.Add(new BaseTypeReference(baseType.Type, entry.Inheritance, entry.Access));
         }
 
         ImmutableArray<ClassTypeSymbol> MroFactory(ClassTypeSymbol type)
