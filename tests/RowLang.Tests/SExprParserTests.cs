@@ -99,4 +99,24 @@ public class SExprParserTests
         Assert.Single(identifier.PostfixAnnotations);
         Assert.Equal("meta", Assert.IsType<SExprIdentifier>(identifier.PostfixAnnotations[0]).QualifiedName);
     }
+
+    [Fact]
+    public void IgnoresLineComments()
+    {
+        const string source = """
+        // leading comment
+        (module // inline comment
+          (value 1) // trailing
+        )
+        """;
+
+        var parser = new SExprParser(source);
+        var nodes = parser.Parse();
+
+        var list = Assert.IsType<SExprList>(Assert.Single(nodes));
+        Assert.Equal(2, list.Elements.Length);
+        Assert.Equal("module", Assert.IsType<SExprIdentifier>(list.Elements[0]).QualifiedName);
+        var body = Assert.IsType<SExprList>(list.Elements[1]);
+        Assert.Equal("value", Assert.IsType<SExprIdentifier>(body.Elements[0]).QualifiedName);
+    }
 }

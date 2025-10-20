@@ -14,15 +14,32 @@ public sealed class RowLangModule
 {
     private readonly TypeSystem _typeSystem;
 
-    internal RowLangModule(TypeSystem typeSystem)
+    internal RowLangModule(TypeSystem typeSystem, ImmutableArray<RunDirective> runs)
     {
         _typeSystem = typeSystem;
+        RunDirectives = runs;
     }
 
     public TypeSystem TypeSystem => _typeSystem;
 
+    public ImmutableArray<RunDirective> RunDirectives { get; }
+
     public RowLang.Core.Runtime.ExecutionContext CreateExecutionContext() => new RowLang.Core.Runtime.ExecutionContext(_typeSystem);
+
+    public IEnumerable<(RunDirective Directive, Value Result)> ExecuteRuns(RowLang.Core.Runtime.ExecutionContext context)
+    {
+        foreach (var directive in RunDirectives)
+        {
+            var instance = context.Instantiate(directive.ClassName);
+            Value result = directive.Origin is null
+                ? context.Invoke(instance, directive.MemberName)
+                : context.Invoke(instance, directive.MemberName, directive.Origin);
+            yield return (directive, result);
+        }
+    }
 }
+
+public sealed record RunDirective(string ClassName, string MemberName, string? Origin);
 
 public static class RowLangScript
 {
@@ -49,7 +66,7 @@ public static class RowLangScript
             builder.Process(form);
         }
 
-        return new RowLangModule(typeSystem);
+        return new RowLangModule(typeSystem, builder.CollectRuns());
     }
 
     private static bool TryMatchIdentifier(SExprList list, int index, string name)
@@ -71,12 +88,15 @@ public static class RowLangScript
     {
         private readonly TypeSystem _typeSystem;
         private readonly TypeRegistry _registry;
+        private readonly List<RunDirective> _runs = new();
 
         public ModuleBuilder(TypeSystem typeSystem)
         {
             _typeSystem = typeSystem;
             _registry = typeSystem.Registry;
         }
+
+        public ImmutableArray<RunDirective> CollectRuns() => _runs.ToImmutableArray();
 
         public void Process(SExprNode node)
         {
@@ -102,6 +122,9 @@ public static class RowLangScript
                 case "row-type":
                     DefineRowType(list);
                     break;
+                case "run":
+                    DefineRun(list);
+                    break;
                 default:
                     throw new InvalidOperationException($"Unknown top-level form '{head.QualifiedName}'.");
             }
@@ -116,6 +139,33 @@ public static class RowLangScript
 
             var effectName = ExpectIdentifier(list.Elements[1], "effect name").QualifiedName;
             _registry.GetOrCreateEffect(effectName);
+        }
+
+        private void DefineRun(SExprList list)
+        {
+            if (list.Elements.Length != 3)
+            {
+                throw new InvalidOperationException("(run <class> <member>) expects exactly two arguments.");
+            }
+
+            var classIdentifier = ExpectIdentifier(list.Elements[1], "run class");
+            var memberIdentifier = ExpectIdentifier(list.Elements[2], "run member");
+
+            if (classIdentifier.TypeAnnotation is not null)
+            {
+                throw new InvalidOperationException("Run class identifier cannot include a type annotation.");
+            }
+
+            if (memberIdentifier.TypeAnnotation is not null)
+            {
+                throw new InvalidOperationException("Run member identifier cannot include a type annotation.");
+            }
+
+            var origin = memberIdentifier.Namespace.IsDefaultOrEmpty
+                ? null
+                : string.Join("::", memberIdentifier.Namespace);
+
+            _runs.Add(new RunDirective(classIdentifier.QualifiedName, memberIdentifier.Name, origin));
         }
 
         private void DefineClass(SExprList list)

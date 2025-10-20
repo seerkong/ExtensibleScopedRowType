@@ -1,0 +1,8 @@
+// Basic greeting example with run directive
+(module
+  (class Greeter
+    (open)
+    (method main
+      (return str)
+      (body (concat (const str "Hello, ") (const str "RowLang!")))))
+  (run Greeter main))

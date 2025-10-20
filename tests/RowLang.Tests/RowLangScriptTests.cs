@@ -166,4 +166,25 @@ public class RowLangScriptTests
         var message = (StringValue)context.Invoke(calculator, "shout");
         Assert.Equal("Result: 3", message.Value);
     }
+
+    [Fact]
+    public void RunDirectiveExecutesMethod()
+    {
+        const string source = """
+        (module
+          (class Runner
+            (open)
+            (method main
+              (return int)
+              (body (+ (const int 1) (const int 2)))))
+          (run Runner main))
+        """;
+
+        var module = RowLangScript.Compile(source);
+        var context = module.CreateExecutionContext();
+
+        var run = Assert.Single(module.ExecuteRuns(context));
+        Assert.Equal("Runner", run.Directive.ClassName);
+        Assert.Equal(3, Assert.IsType<IntValue>(run.Result).Value);
+    }
 }

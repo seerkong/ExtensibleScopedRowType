@@ -1,179 +1,68 @@
-using System;
-using System.Linq;
-using RowLang.Core;
 using RowLang.Core.Runtime;
 using RowLang.Core.Scripting;
-using RuntimeExecutionContext = RowLang.Core.Runtime.ExecutionContext;
-using RowLang.Core.Types;
 
-var typeSystem = new TypeSystem();
-var registry = typeSystem.Registry;
+if (args.Length == 0 || args[0] is "-h" or "--help")
+{
+    Console.WriteLine("Usage: rowlang <directory>");
+    Console.WriteLine("Compiles and executes run directives in KON modules found in the directory.");
+    return;
+}
 
-Console.WriteLine("RowLang CLI demo - extensible scoped row types\n");
+var workspace = new DirectoryInfo(args[0]);
+if (!workspace.Exists)
+{
+    Console.Error.WriteLine($"Directory '{workspace.FullName}' does not exist.");
+    Environment.ExitCode = 1;
+    return;
+}
 
-var t1 = typeSystem.DefineRowType(
-    "T1",
-    new[]
+var konFiles = workspace
+    .EnumerateFiles("*.kon", SearchOption.AllDirectories)
+    .OrderBy(static file => file.FullName, StringComparer.Ordinal)
+    .ToArray();
+
+if (konFiles.Length == 0)
+{
+    Console.Error.WriteLine($"No .kon files found under '{workspace.FullName}'.");
+    Environment.ExitCode = 1;
+    return;
+}
+
+foreach (var file in konFiles)
+{
+    Console.WriteLine($"\n=== {file.FullName} ===");
+    var source = await File.ReadAllTextAsync(file.FullName);
+    RowLangModule module;
+    try
     {
-        RowMemberBuilder.Method("T1", "a", registry.CreateFunctionType("T1::a", Array.Empty<TypeSymbol>(), registry.Int)),
-        RowMemberBuilder.Method("T1", "b", registry.CreateFunctionType("T1::b", Array.Empty<TypeSymbol>(), registry.String)),
-    },
-    isOpen: true);
-
-var t2 = typeSystem.DefineRowType(
-    "T2",
-    new[]
+        module = RowLangScript.Compile(source);
+    }
+    catch (Exception ex)
     {
-        RowMemberBuilder.Method("T2", "b", registry.CreateFunctionType("T2::b", Array.Empty<TypeSymbol>(), registry.Int)),
-        RowMemberBuilder.Method("T2", "c", registry.CreateFunctionType("T2::c", Array.Empty<TypeSymbol>(), registry.Bool)),
-    },
-    isOpen: true);
+        Console.Error.WriteLine($"Compilation failed: {ex.Message}");
+        Environment.ExitCode = 1;
+        continue;
+    }
 
-var merged = typeSystem.MergeRows("T3", t1, t2);
-Console.WriteLine("Merged row type T3 combines T1 and T2:");
-foreach (var row in merged.Members)
-{
-    Console.WriteLine($"  {row.Origin}::{row.Name} : {row.Type}");
-}
-
-Console.WriteLine("\nSubtype relationships:");
-Console.WriteLine($"  T3 <: T1 ? {typeSystem.IsSubtype(merged, t1)}");
-Console.WriteLine($"  T3 <: T2 ? {typeSystem.IsSubtype(merged, t2)}");
-
-var toStringSignature = registry.CreateFunctionType("to_string", new[] { registry.Any }, registry.String);
-
-typeSystem.DefineClass(
-    "ToString",
-    new[] { RowMemberBuilder.Method("ToString", "to_string", toStringSignature, RowQualifier.Virtual) },
-    isOpen: true,
-    bases: new[] { ("object", InheritanceKind.Real, AccessModifier.Public) },
-    methodBodies: Array.Empty<MethodBody>(),
-    isTrait: true);
-
-typeSystem.DefineClass(
-    "A",
-    new[] { RowMemberBuilder.Method("A", "to_string", toStringSignature, RowQualifier.Override) },
-    isOpen: true,
-    bases: new[] { ("ToString", InheritanceKind.Real, AccessModifier.Public) },
-    methodBodies: new[]
+    var context = module.CreateExecutionContext();
+    var runs = module.RunDirectives;
+    if (runs.IsDefaultOrEmpty || runs.Length == 0)
     {
-        MethodBuilder.FromLambda(
-            "A",
-            "to_string",
-            toStringSignature,
-            static (ctx, args) => new StringValue("A"),
-            RowQualifier.Override)
-    });
+        Console.WriteLine("(no run directives found)");
+        continue;
+    }
 
-typeSystem.DefineClass(
-    "B",
-    new[] { RowMemberBuilder.Method("B", "to_string", toStringSignature, RowQualifier.Override) },
-    isOpen: true,
-    bases: new[] { ("A", InheritanceKind.Real, AccessModifier.Public) },
-    methodBodies: new[]
+    foreach (var (directive, result) in module.ExecuteRuns(context))
     {
-        MethodBuilder.FromLambda(
-            "B",
-            "to_string",
-            toStringSignature,
-            static (ctx, args) => new StringValue("B"),
-            RowQualifier.Override)
-    });
-
-var context = new RuntimeExecutionContext(typeSystem);
-var instance = context.Instantiate("B");
-var defaultCall = (StringValue)context.Invoke(instance, "to_string");
-var traitCall = (StringValue)context.Invoke(instance, "to_string", "ToString");
-var baseCall = (StringValue)context.Invoke(instance, "to_string", "A");
-
-Console.WriteLine("\nToString trait dispatch:");
-Console.WriteLine($"  B::to_string() -> {defaultCall.Value}");
-Console.WriteLine($"  ToString::to_string(B) -> {traitCall.Value}");
-Console.WriteLine($"  A::to_string(B) -> {baseCall.Value}");
-
-Console.WriteLine("\nMethod resolution order for class B:");
-Console.WriteLine(string.Join(" -> ", typeSystem.RequireClassSymbol("B").MethodResolutionOrder.Select(t => t.Name)));
-
-Console.WriteLine("\nClass subtyping checks:");
-var toStringClass = typeSystem.RequireClassSymbol("ToString");
-var aClass = typeSystem.RequireClassSymbol("A");
-var bClass = typeSystem.RequireClassSymbol("B");
-Console.WriteLine($"  B <: A ? {typeSystem.IsSubtype(bClass, aClass)}");
-Console.WriteLine($"  B <: ToString ? {typeSystem.IsSubtype(bClass, toStringClass)}");
-
-var asyncEffect = registry.GetOrCreateEffect("async");
-var fileReadSignature = registry.CreateFunctionType(
-    "File::read",
-    Array.Empty<TypeSymbol>(),
-    registry.String,
-    new[] { asyncEffect });
-
-typeSystem.DefineClass(
-    "File",
-    new[] { RowMemberBuilder.Method("File", "read", fileReadSignature) },
-    isOpen: true,
-    bases: new[] { ("object", InheritanceKind.Real, AccessModifier.Public) },
-    methodBodies: new[]
-    {
-        MethodBuilder.FromLambda(
-            "File",
-            "read",
-            fileReadSignature,
-            static (ctx, args) => new StringValue("file-data"))
-    });
-
-var fileInstance = context.Instantiate("File");
-
-Console.WriteLine("\nEffect system demo:");
-try
-{
-    context.Invoke(fileInstance, "read");
-}
-catch (InvalidOperationException ex)
-{
-    Console.WriteLine($"  Calling File.read without async effect fails: {ex.Message}");
+        Console.WriteLine($"-> {directive.ClassName}.{directive.MemberName}() = {FormatValue(result)}");
+    }
 }
 
-using (context.PushEffectScope(asyncEffect))
+static string FormatValue(Value value) => value switch
 {
-    var data = (StringValue)context.Invoke(fileInstance, "read");
-    Console.WriteLine($"  Within async scope File.read -> {data.Value}");
-}
-
-Console.WriteLine("\nDemo complete.");
-
-const string script = """
-(module
-  (effect async)
-  (class ScriptFile
-    !trace
-    (open)
-    (method read
-      (return str)
-      (effects [async])
-      (body ^logged
-        (let ((payload { message = (const str script-data) tags = ["cli" "demo"] }))
-          (concat (const str script-data) (const str "!")))))))
-""";
-
-Console.WriteLine("\nScript-based module demo:\n" + script + "\n");
-
-var module = RowLangScript.Compile(script);
-var scriptContext = module.CreateExecutionContext();
-var scriptEffect = module.TypeSystem.Registry.GetOrCreateEffect("async");
-var scriptInstance = scriptContext.Instantiate("ScriptFile");
-
-try
-{
-    scriptContext.Invoke(scriptInstance, "read");
-}
-catch (InvalidOperationException ex)
-{
-    Console.WriteLine($"  Without effect scope: {ex.Message}");
-}
-
-using (scriptContext.PushEffectScope(scriptEffect))
-{
-    var payload = (StringValue)scriptContext.Invoke(scriptInstance, "read");
-    Console.WriteLine($"  With async scope ScriptFile.read -> {payload.Value}");
-}
+    StringValue str => str.Value,
+    IntValue number => number.Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
+    BoolValue boolean => boolean.Value ? "true" : "false",
+    ObjectValue obj => $"<{obj.Class.Name}>",
+    _ => value.ToString() ?? string.Empty,
+};
