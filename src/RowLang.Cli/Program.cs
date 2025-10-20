@@ -9,7 +9,7 @@ if (args.Length == 0 || args[0] is "-h" or "--help")
 }
 
 var targetPath = args[0];
-IReadOnlyList<FileInfo> konFiles;
+FileInfo[] konFiles;
 
 if (Directory.Exists(targetPath))
 {
