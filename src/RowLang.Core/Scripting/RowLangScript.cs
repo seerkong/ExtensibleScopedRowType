@@ -583,6 +583,11 @@ public static class RowLangScript
                 }
 
                 var name = identifier.QualifiedName;
+                if (name.Contains('.', StringComparison.Ordinal))
+                {
+                    return EvaluateDottedIdentifier(name, scope, invocation);
+                }
+
                 if (string.Equals(name, "self", StringComparison.Ordinal))
                 {
                     return invocation.Self ?? throw new InvalidOperationException("Method invoked without a self instance.");
@@ -610,6 +615,28 @@ public static class RowLangScript
 
                 throw new InvalidOperationException(
                     $"Unknown identifier '{name}' in method '{_specification.Owner}::{_specification.Name}'.");
+            }
+
+            private Value EvaluateDottedIdentifier(string expression, Scope scope, InvocationContext invocation)
+            {
+                var parts = expression.Split('.', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 0)
+                {
+                    throw new InvalidOperationException("Empty dotted identifier.");
+                }
+
+                var current = EvaluateIdentifier(new SExprIdentifier(ImmutableArray.Create(parts[0])), scope, invocation);
+                for (var i = 1; i < parts.Length; i++)
+                {
+                    var part = parts[i];
+                    current = current switch
+                    {
+                        MapValue map when map.Properties.TryGetValue(part, out var value) => value,
+                        _ => throw new InvalidOperationException($"Identifier '{expression}' cannot resolve member '{part}'."),
+                    };
+                }
+
+                return current;
             }
 
             private Value EvaluateList(SExprList list, Scope scope, InvocationContext invocation, IReadOnlyList<Value> arguments)

@@ -209,4 +209,25 @@ public class RowLangScriptTests
         var run = Assert.Single(module.ExecuteRuns(context));
         Assert.Equal("done", Assert.IsType<StringValue>(run.Result).Value);
     }
+
+    [Fact]
+    public void MethodSupportsMapPropertyLookup()
+    {
+        const string source = """
+        (module
+          (class Reader
+            (open)
+            (method main
+              (return str)
+              (body
+                (let ((info { path = (const str data) }))
+                  (concat info.path (const str "!"))))))
+          (run Reader main))
+        """;
+
+        var module = RowLangScript.Compile(source);
+        var context = module.CreateExecutionContext();
+        var run = Assert.Single(module.ExecuteRuns(context));
+        Assert.Equal("data!", Assert.IsType<StringValue>(run.Result).Value);
+    }
 }
