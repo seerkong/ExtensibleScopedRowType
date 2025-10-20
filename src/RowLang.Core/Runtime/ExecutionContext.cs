@@ -132,7 +132,8 @@ public sealed class ExecutionContext
             }
 
             var target = list[0];
-            list.Insert(0, new RowImplementation(traitMember, target.Function));
+            var forwarded = traitMember with { Qualifier = RowQualifier.Default };
+            list.Insert(0, new RowImplementation(forwarded, target.Function));
         }
 
         foreach (var virtualMember in pendingVirtualBases)

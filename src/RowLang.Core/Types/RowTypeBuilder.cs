@@ -75,6 +75,11 @@ public static class RowTypeBuilder
                 }
                 else
                 {
+                    if (member.IsFinal && members.Any(m => m.Name == member.Name && m.Origin != member.Origin))
+                    {
+                        throw new InvalidOperationException($"Cannot override final member '{member.Name}' in {type.Name}.");
+                    }
+
                     members.Add(member);
                     existing.Add(key);
                     overridesAwaitingBase.Remove(member.Name);
