@@ -96,4 +96,117 @@ public sealed class TypeSystem
 
         return new RowTypeSymbol(resultName, merged.Members, merged.IsOpen);
     }
+
+    public bool IsSubtype(ClassTypeSymbol candidate, ClassTypeSymbol target)
+        => IsSubtype(candidate.Rows, target.Rows);
+
+    public bool IsSubtype(RowTypeSymbol candidate, RowTypeSymbol target)
+    {
+        var remaining = new List<RowMember>();
+        foreach (var member in candidate.Members)
+        {
+            if (!MemberCanSatisfyRequirement(member))
+            {
+                continue;
+            }
+
+            remaining.Add(member);
+        }
+
+        foreach (var required in target.Members)
+        {
+            var matchIndex = FindCompatibleMemberIndex(remaining, required);
+            if (matchIndex < 0)
+            {
+                return false;
+            }
+
+            remaining.RemoveAt(matchIndex);
+        }
+
+        return true;
+    }
+
+    private static bool MemberCanSatisfyRequirement(RowMember member) => !member.IsVirtual;
+
+    private int FindCompatibleMemberIndex(List<RowMember> available, RowMember required)
+    {
+        for (var i = 0; i < available.Count; i++)
+        {
+            var candidate = available[i];
+            if (candidate.Name != required.Name)
+            {
+                continue;
+            }
+
+            if (!AreTypesCompatible(candidate.Type, required.Type))
+            {
+                continue;
+            }
+
+            return i;
+        }
+
+        return -1;
+    }
+
+    private bool AreTypesCompatible(TypeSymbol candidate, TypeSymbol required)
+    {
+        if (ReferenceEquals(candidate, required) || candidate.Name == required.Name)
+        {
+            return true;
+        }
+
+        if (candidate is FunctionTypeSymbol candidateFunction && required is FunctionTypeSymbol requiredFunction)
+        {
+            if (candidateFunction.Parameters.Length != requiredFunction.Parameters.Length)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < candidateFunction.Parameters.Length; i++)
+            {
+                if (!AreTypesCompatible(candidateFunction.Parameters[i], requiredFunction.Parameters[i]))
+                {
+                    return false;
+                }
+            }
+
+            if (!AreTypesCompatible(candidateFunction.ReturnType, requiredFunction.ReturnType))
+            {
+                return false;
+            }
+
+            if (!EffectSetsEqual(candidateFunction.Effects, requiredFunction.Effects))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        if (candidate is RowTypeSymbol candidateRow && required is RowTypeSymbol requiredRow)
+        {
+            return IsSubtype(candidateRow, requiredRow);
+        }
+
+        return false;
+    }
+
+    private static bool EffectSetsEqual(ImmutableArray<EffectSymbol> left, ImmutableArray<EffectSymbol> right)
+    {
+        if (left.Length != right.Length)
+        {
+            return false;
+        }
+
+        if (left.IsDefaultOrEmpty && right.IsDefaultOrEmpty)
+        {
+            return true;
+        }
+
+        var leftNames = left.Select(e => e.Name).OrderBy(static n => n).ToArray();
+        var rightNames = right.Select(e => e.Name).OrderBy(static n => n).ToArray();
+        return leftNames.SequenceEqual(rightNames);
+    }
 }
