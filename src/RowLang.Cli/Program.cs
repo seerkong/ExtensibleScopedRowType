@@ -35,6 +35,10 @@ foreach (var row in merged.Members)
     Console.WriteLine($"  {row.Origin}::{row.Name} : {row.Type}");
 }
 
+Console.WriteLine("\nSubtype relationships:");
+Console.WriteLine($"  T3 <: T1 ? {typeSystem.IsSubtype(merged, t1)}");
+Console.WriteLine($"  T3 <: T2 ? {typeSystem.IsSubtype(merged, t2)}");
+
 var toStringSignature = registry.CreateFunctionType("to_string", new[] { registry.Any }, registry.String);
 
 typeSystem.DefineClass(
@@ -88,6 +92,13 @@ Console.WriteLine($"  A::to_string(B) -> {baseCall.Value}");
 
 Console.WriteLine("\nMethod resolution order for class B:");
 Console.WriteLine(string.Join(" -> ", typeSystem.RequireClassSymbol("B").MethodResolutionOrder.Select(t => t.Name)));
+
+Console.WriteLine("\nClass subtyping checks:");
+var toStringClass = typeSystem.RequireClassSymbol("ToString");
+var aClass = typeSystem.RequireClassSymbol("A");
+var bClass = typeSystem.RequireClassSymbol("B");
+Console.WriteLine($"  B <: A ? {typeSystem.IsSubtype(bClass, aClass)}");
+Console.WriteLine($"  B <: ToString ? {typeSystem.IsSubtype(bClass, toStringClass)}");
 
 var asyncEffect = registry.GetOrCreateEffect("async");
 var fileReadSignature = registry.CreateFunctionType(
