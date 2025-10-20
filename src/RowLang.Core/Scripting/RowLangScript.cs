@@ -294,7 +294,7 @@ public static class RowLangScript
                 throw new InvalidOperationException($"Method '{specification.Name}' is missing a body.");
             }
 
-            var implementation = CompileBody(specification.BodyNode, specification.Signature.ReturnType);
+            var implementation = CompileBody(specification);
             return MethodBuilder.FromLambda(
                 specification.Owner,
                 specification.Name,
@@ -402,6 +402,251 @@ public static class RowLangScript
             RowQualifier Qualifier,
             SExprNode? BodyNode);
 
+        private sealed class Scope
+        {
+            private readonly Scope? _parent;
+            private readonly Dictionary<string, Value> _values;
+
+            private Scope(Scope? parent)
+            {
+                _parent = parent;
+                _values = new Dictionary<string, Value>(StringComparer.Ordinal);
+            }
+
+            public static Scope CreateRoot() => new(null);
+
+            public Scope CreateChild() => new(this);
+
+            public void Set(string name, Value value) => _values[name] = value;
+
+            public bool TryGet(string name, out Value value)
+            {
+                if (_values.TryGetValue(name, out value))
+                {
+                    return true;
+                }
+
+                if (_parent is not null)
+                {
+                    return _parent.TryGet(name, out value);
+                }
+
+                value = default!;
+                return false;
+            }
+        }
+
+        private sealed class MethodBodyInterpreter
+        {
+            private readonly ModuleBuilder _builder;
+            private readonly MethodSpecification _specification;
+            private readonly Dictionary<string, int> _parameterIndex;
+
+            public MethodBodyInterpreter(ModuleBuilder builder, MethodSpecification specification)
+            {
+                _builder = builder;
+                _specification = specification;
+                _parameterIndex = specification.Parameters
+                    .Select((parameter, index) => (parameter, index))
+                    .Where(tuple => !string.IsNullOrEmpty(tuple.parameter.Name))
+                    .ToDictionary(tuple => tuple.parameter.Name!, tuple => tuple.index, StringComparer.Ordinal);
+            }
+
+            public Value Invoke(InvocationContext invocation, IReadOnlyList<Value> arguments)
+            {
+                if (arguments.Count != _specification.Signature.Parameters.Length)
+                {
+                    throw new InvalidOperationException(
+                        $"Method '{_specification.Owner}::{_specification.Name}' expects {_specification.Signature.Parameters.Length} argument(s) but received {arguments.Count}.");
+                }
+
+                var scope = Scope.CreateRoot();
+                foreach (var (name, index) in _parameterIndex)
+                {
+                    scope.Set(name, arguments[index]);
+                }
+
+                var result = Evaluate(_specification.BodyNode!, scope, invocation, arguments);
+                _builder.EnsureReturnCompatibility(_specification.Signature.ReturnType, result.Type, result.Type.Name);
+                return result;
+            }
+
+            private Value Evaluate(SExprNode node, Scope scope, InvocationContext invocation, IReadOnlyList<Value> arguments)
+            {
+                return node switch
+                {
+                    SExprIdentifier identifier => EvaluateIdentifier(identifier, scope, invocation),
+                    SExprString str => new StringValue(str.Value),
+                    SExprList list => EvaluateList(list, scope, invocation, arguments),
+                    _ => throw new InvalidOperationException($"Unsupported expression '{node}'."),
+                };
+            }
+
+            private Value EvaluateIdentifier(SExprIdentifier identifier, Scope scope, InvocationContext invocation)
+            {
+                if (!identifier.Namespace.IsDefaultOrEmpty)
+                {
+                    throw new InvalidOperationException(
+                        $"Qualified identifier '{identifier.QualifiedName}' cannot be used as a value in '{_specification.Owner}::{_specification.Name}'.");
+                }
+
+                var name = identifier.QualifiedName;
+                return name switch
+                {
+                    "self" => invocation.Self ?? throw new InvalidOperationException("Method invoked without a self instance."),
+                    "true" => new BoolValue(true),
+                    "false" => new BoolValue(false),
+                    _ when scope.TryGet(name, out var value) => value,
+                    _ => throw new InvalidOperationException(
+                        $"Unknown identifier '{name}' in method '{_specification.Owner}::{_specification.Name}'."),
+                };
+            }
+
+            private Value EvaluateList(SExprList list, Scope scope, InvocationContext invocation, IReadOnlyList<Value> arguments)
+            {
+                if (list.Elements.IsDefaultOrEmpty)
+                {
+                    throw new InvalidOperationException("Encountered empty expression list.");
+                }
+
+                var head = ModuleBuilder.ExpectIdentifier(list.Elements[0], "expression head");
+                return head.QualifiedName switch
+                {
+                    "const" => EvaluateConst(list),
+                    "let" => EvaluateLet(list, scope, invocation, arguments),
+                    "call" => EvaluateCall(list, scope, invocation, arguments),
+                    "new" => EvaluateNew(list, invocation),
+                    _ => throw new InvalidOperationException($"Unknown expression form '{head.QualifiedName}'."),
+                };
+            }
+
+            private Value EvaluateConst(SExprList list)
+            {
+                if (list.Elements.Length != 3)
+                {
+                    throw new InvalidOperationException("(const <type> <value>) expects exactly two arguments.");
+                }
+
+                var typeName = ModuleBuilder.ExpectIdentifier(list.Elements[1], "const type").QualifiedName;
+                var valueNode = list.Elements[2];
+
+                return typeName switch
+                {
+                    "str" => new StringValue(valueNode switch
+                    {
+                        SExprIdentifier identifier => identifier.QualifiedName,
+                        SExprString str => str.Value,
+                        _ => throw new InvalidOperationException($"Expected string literal but found '{valueNode}'."),
+                    }),
+                    "int" => CreateIntValue(valueNode),
+                    "bool" => CreateBoolValue(valueNode),
+                    _ => throw new InvalidOperationException($"Unsupported const type '{typeName}'."),
+                };
+            }
+
+            private static Value CreateIntValue(SExprNode node)
+            {
+                var text = ModuleBuilder.ExpectIdentifier(node, "int literal").QualifiedName;
+                if (!int.TryParse(text, out var parsed))
+                {
+                    throw new InvalidOperationException($"Invalid int literal '{text}'.");
+                }
+
+                return new IntValue(parsed);
+            }
+
+            private static Value CreateBoolValue(SExprNode node)
+            {
+                var text = ModuleBuilder.ExpectIdentifier(node, "bool literal").QualifiedName;
+                if (!bool.TryParse(text, out var parsed))
+                {
+                    throw new InvalidOperationException($"Invalid bool literal '{text}'.");
+                }
+
+                return new BoolValue(parsed);
+            }
+
+            private Value EvaluateLet(SExprList list, Scope scope, InvocationContext invocation, IReadOnlyList<Value> arguments)
+            {
+                if (list.Elements.Length < 3)
+                {
+                    throw new InvalidOperationException("(let (<bindings>) <body...>) requires bindings and a body.");
+                }
+
+                if (list.Elements[1] is not SExprList bindings)
+                {
+                    throw new InvalidOperationException("Let bindings must be provided as a list.");
+                }
+
+                var child = scope.CreateChild();
+                foreach (var bindingNode in bindings.Elements)
+                {
+                    if (bindingNode is not SExprList binding || binding.Elements.Length != 2)
+                    {
+                        throw new InvalidOperationException("Each let binding must have the form (name value).");
+                    }
+
+                    var name = ModuleBuilder.ExpectIdentifier(binding.Elements[0], "binding name").QualifiedName;
+                    var value = Evaluate(binding.Elements[1], child, invocation, arguments);
+                    child.Set(name, value);
+                }
+
+                Value? result = null;
+                for (var i = 2; i < list.Elements.Length; i++)
+                {
+                    result = Evaluate(list.Elements[i], child, invocation, arguments);
+                }
+
+                if (result is null)
+                {
+                    throw new InvalidOperationException("Let expression requires at least one body expression.");
+                }
+
+                return result;
+            }
+
+            private Value EvaluateCall(SExprList list, Scope scope, InvocationContext invocation, IReadOnlyList<Value> arguments)
+            {
+                if (list.Elements.Length < 3)
+                {
+                    throw new InvalidOperationException("(call <target> <member> ...) requires at least a target and member.");
+                }
+
+                var target = Evaluate(list.Elements[1], scope, invocation, arguments);
+                if (target is not ObjectValue instance)
+                {
+                    throw new InvalidOperationException("call target must evaluate to an object.");
+                }
+
+                var member = ModuleBuilder.ExpectIdentifier(list.Elements[2], "member name");
+                var origin = member.Namespace.IsDefaultOrEmpty
+                    ? null
+                    : string.Join("::", member.Namespace);
+                var memberName = member.Name;
+
+                var evaluatedArgs = new Value[list.Elements.Length - 3];
+                for (var i = 3; i < list.Elements.Length; i++)
+                {
+                    evaluatedArgs[i - 3] = Evaluate(list.Elements[i], scope, invocation, arguments);
+                }
+
+                return origin is null
+                    ? invocation.Execution.Invoke(instance, memberName, evaluatedArgs)
+                    : invocation.Execution.Invoke(instance, memberName, origin, evaluatedArgs);
+            }
+
+            private Value EvaluateNew(SExprList list, InvocationContext invocation)
+            {
+                if (list.Elements.Length != 2)
+                {
+                    throw new InvalidOperationException("(new <ClassName>) expects exactly one argument.");
+                }
+
+                var classIdentifier = ModuleBuilder.ExpectIdentifier(list.Elements[1], "class name");
+                return invocation.Execution.Instantiate(classIdentifier.QualifiedName);
+            }
+        }
+
         private IEnumerable<ParameterSyntax> ParseParameters(SExprList section)
         {
             foreach (var paramNode in section.Elements[1..])
@@ -503,78 +748,15 @@ public static class RowLangScript
             return RowMemberBuilder.Field(owner, fieldName, fieldType, qualifier);
         }
 
-        private Func<InvocationContext, IReadOnlyList<Value>, Value> CompileBody(SExprNode node, TypeSymbol returnType)
+        private Func<InvocationContext, IReadOnlyList<Value>, Value> CompileBody(MethodSpecification specification)
         {
-            if (node is SExprList list && !list.Elements.IsDefaultOrEmpty)
+            if (specification.BodyNode is null)
             {
-                var head = ExpectIdentifier(list.Elements[0], "body expression");
-                switch (head.QualifiedName)
-                {
-                    case "const":
-                        if (list.Elements.Length != 3)
-                        {
-                            throw new InvalidOperationException("(const <type> <value>) expects exactly two arguments.");
-                        }
-
-                        return CompileConst(list.Elements[1], list.Elements[2], returnType);
-                }
+                throw new InvalidOperationException($"Method '{specification.Name}' is missing a body.");
             }
 
-            throw new InvalidOperationException("Unsupported method body expression.");
-        }
-
-        private Func<InvocationContext, IReadOnlyList<Value>, Value> CompileConst(
-            SExprNode typeNode,
-            SExprNode valueNode,
-            TypeSymbol returnType)
-        {
-            var typeName = ExpectIdentifier(typeNode, "const type").QualifiedName;
-            return typeName switch
-            {
-                "str" => CompileStringConst(valueNode, returnType),
-                "int" => CompileIntConst(valueNode, returnType),
-                "bool" => CompileBoolConst(valueNode, returnType),
-                _ => throw new InvalidOperationException($"Unsupported const type '{typeName}'."),
-            };
-        }
-
-        private Func<InvocationContext, IReadOnlyList<Value>, Value> CompileStringConst(SExprNode node, TypeSymbol returnType)
-        {
-            EnsureReturnCompatibility(returnType, _registry.String, "str");
-            var text = node switch
-            {
-                SExprIdentifier identifier => identifier.QualifiedName,
-                SExprString str => str.Value,
-                _ => throw new InvalidOperationException($"Expected string literal but found '{node}'."),
-            };
-            var value = new StringValue(text);
-            return (_, _) => value;
-        }
-
-        private Func<InvocationContext, IReadOnlyList<Value>, Value> CompileIntConst(SExprNode node, TypeSymbol returnType)
-        {
-            EnsureReturnCompatibility(returnType, _registry.Int, "int");
-            var text = ExpectIdentifier(node, "int literal").QualifiedName;
-            if (!int.TryParse(text, out var parsed))
-            {
-                throw new InvalidOperationException($"Invalid int literal '{text}'.");
-            }
-
-            var value = new IntValue(parsed);
-            return (_, _) => value;
-        }
-
-        private Func<InvocationContext, IReadOnlyList<Value>, Value> CompileBoolConst(SExprNode node, TypeSymbol returnType)
-        {
-            EnsureReturnCompatibility(returnType, _registry.Bool, "bool");
-            var text = ExpectIdentifier(node, "bool literal").QualifiedName;
-            if (!bool.TryParse(text, out var parsed))
-            {
-                throw new InvalidOperationException($"Invalid bool literal '{text}'.");
-            }
-
-            var value = new BoolValue(parsed);
-            return (_, _) => value;
+            var interpreter = new MethodBodyInterpreter(this, specification);
+            return interpreter.Invoke;
         }
 
         private void EnsureReturnCompatibility(TypeSymbol declared, TypeSymbol required, string description)
