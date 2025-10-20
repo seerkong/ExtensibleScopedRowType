@@ -1,0 +1,14 @@
+// Demonstrates effect annotations and let/object composition
+(module
+  (effect async)
+  (class File
+    !trace
+    (open)
+    (method read
+      (return str)
+      (effects [async])
+      (body
+        (let ((info { path = (const str "/tmp/data") tries = [1 2 3] })
+                   (payload (concat (const str "Read ") info.path)))
+          payload))))
+  (run File read))

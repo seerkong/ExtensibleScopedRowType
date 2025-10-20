@@ -306,7 +306,26 @@ public sealed class SExprParser
                 continue;
             }
 
+            if (ch == '/' && _position + 1 < _text.Length && _text[_position + 1] == '/')
+            {
+                SkipLineComment();
+                continue;
+            }
+
             break;
+        }
+    }
+
+    private void SkipLineComment()
+    {
+        _position += 2;
+        while (_position < _text.Length)
+        {
+            var ch = _text[_position++];
+            if (ch is '\n' or '\r')
+            {
+                break;
+            }
         }
     }
 
