@@ -18,7 +18,17 @@ public sealed record SExprIdentifier(ImmutableArray<string> Parts) : SExprNode
 
     public ImmutableArray<string> Namespace => Parts.Length <= 1 ? ImmutableArray<string>.Empty : Parts[..^1];
 
-    public override string ToString() => QualifiedName;
+    public SExprNode? TypeAnnotation { get; init; }
+
+    public override string ToString()
+    {
+        if (TypeAnnotation is null)
+        {
+            return QualifiedName;
+        }
+
+        return $"{QualifiedName} ~ {TypeAnnotation}";
+    }
 }
 
 public sealed record SExprString(string Value) : SExprNode
