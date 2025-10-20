@@ -1,0 +1,32 @@
+// Demonstrates access modifiers and explicit origin dispatch
+(module
+  (class Base
+    (open)
+    (method secret
+      (access private)
+      (return str)
+      (body (const str "hidden")))
+    (method hint
+      (access protected)
+      (return str)
+      (body (const str "hidden")))
+    (method internal-note
+      (access internal)
+      (return str)
+      (body (const str "internal")))
+    (method reveal
+      (return str)
+      (body (Base::secret this))))
+
+  (class Derived ^(extends Base)
+    (open)
+    (method ping
+      (access protected)
+      (return str)
+      (body (concat (Base::hint this) (const str " via protected"))))
+    (method shout
+      (return str)
+      (body ($ this Derived::ping))))
+
+  (run Base reveal)
+  (run Derived shout))

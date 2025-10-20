@@ -378,7 +378,7 @@ public static class RowLangScript
                             throw new InvalidOperationException($"Row type method '{methodSpec.Name}' cannot declare a body.");
                         }
 
-                        members.Add(RowMemberBuilder.Method(rowName, methodSpec.Name, methodSpec.Signature, methodSpec.Qualifier));
+                        members.Add(RowMemberBuilder.Method(rowName, methodSpec.Name, methodSpec.Signature, methodSpec.Qualifier, methodSpec.Access));
                         break;
                     case "field":
                         members.Add(ParseField(rowName, clause));
@@ -493,7 +493,8 @@ public static class RowLangScript
                 specification.Name,
                 specification.Signature,
                 implementation,
-                specification.Qualifier);
+                specification.Qualifier,
+                specification.Access);
         }
 
         private MethodSpecification ParseMethodSpecification(string owner, SExprList clause, bool allowBody)
@@ -523,6 +524,7 @@ public static class RowLangScript
             TypeSymbol? returnType = null;
             var effects = new List<EffectSymbol>();
             RowQualifier qualifier = RowQualifier.Default;
+            AccessModifier accessModifier = AccessModifier.Public;
             SExprNode? bodyNode = null;
 
             foreach (var element in clause.Elements[2..])
@@ -567,6 +569,14 @@ public static class RowLangScript
                         }
 
                         qualifier = ParseQualifier(ExpectIdentifier(section.Elements[1], "qualifier"));
+                        break;
+                    case "access":
+                        if (section.Elements.Length != 2)
+                        {
+                            throw new InvalidOperationException("(access <modifier>) expects exactly one argument.");
+                        }
+
+                        accessModifier = ParseAccess(ExpectIdentifier(section.Elements[1], "access modifier"));
                         break;
                     case "body":
                         if (!allowBody)
@@ -659,6 +669,7 @@ public static class RowLangScript
                 parameters.ToImmutableArray(),
                 signature,
                 qualifier,
+                accessModifier,
                 bodyNode,
                 rowReference);
         }
@@ -779,6 +790,7 @@ public static class RowLangScript
             ImmutableArray<ParameterSyntax> Parameters,
             FunctionTypeSymbol Signature,
             RowQualifier Qualifier,
+            AccessModifier Access,
             SExprNode? BodyNode,
             RowMemberReference? RowReference);
 
@@ -1390,6 +1402,7 @@ public static class RowLangScript
             }
 
             var qualifier = RowQualifier.Default;
+            var access = AccessModifier.Public;
             foreach (var option in clause.Elements[2..])
             {
                 if (option is not SExprList optionList || optionList.Elements.IsDefaultOrEmpty)
@@ -1408,12 +1421,20 @@ public static class RowLangScript
 
                         qualifier = ParseQualifier(ExpectIdentifier(optionList.Elements[1], "qualifier"));
                         break;
+                    case "access":
+                        if (optionList.Elements.Length != 2)
+                        {
+                            throw new InvalidOperationException("(access <modifier>) expects exactly one argument.");
+                        }
+
+                        access = ParseAccess(ExpectIdentifier(optionList.Elements[1], "access modifier"));
+                        break;
                     default:
                         throw new InvalidOperationException($"Unknown field option '{optionHead.QualifiedName}'.");
                 }
             }
 
-            return RowMemberBuilder.Field(owner, fieldName, fieldType, qualifier);
+            return RowMemberBuilder.Field(owner, fieldName, fieldType, qualifier, access);
         }
 
         private Func<InvocationContext, IReadOnlyList<Value>, Value> CompileBody(MethodSpecification specification)

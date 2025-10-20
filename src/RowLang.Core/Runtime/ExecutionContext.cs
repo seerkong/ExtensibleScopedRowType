@@ -219,16 +219,28 @@ public sealed class ExecutionContext
             throw new InvalidOperationException($"Member '{memberName}' does not exist on {instance.Class.Name}.");
         }
 
+        var originSpecified = origin is not null;
+
         foreach (var implementation in implementations)
         {
-            if (origin is not null && implementation.Member.Origin != origin)
+            if (originSpecified && implementation.Member.Origin != origin)
             {
+                continue;
+            }
+
+            if (!IsAccessible(implementation.Member, instance, originSpecified))
+            {
+                if (originSpecified && implementation.Member.Origin == origin)
+                {
+                    throw new InvalidOperationException($"Member '{memberName}' from {implementation.Member.Origin} is not accessible.");
+                }
+
                 continue;
             }
 
             if (implementation.Member.IsVirtual)
             {
-                if (origin is not null)
+                if (originSpecified)
                 {
                     throw new InvalidOperationException($"Member '{memberName}' from {implementation.Member.Origin} is declared virtual and cannot be invoked.");
                 }
@@ -241,12 +253,35 @@ public sealed class ExecutionContext
             return function.Body(new InvocationContext(this, instance), arguments);
         }
 
-        if (origin is null && implementations.Any(m => m.Member.IsVirtual))
+        if (!originSpecified && implementations.Any(m => m.Member.IsVirtual))
         {
             throw new InvalidOperationException($"Member '{memberName}' requires an override but none was provided.");
         }
 
         throw new InvalidOperationException($"No matching member '{memberName}' found for origin '{origin ?? "<default>"}'.");
+    }
+
+    private bool IsAccessible(RowMember member, ObjectValue instance, bool originSpecified)
+    {
+        return member.Access switch
+        {
+            AccessModifier.Public => true,
+            AccessModifier.Internal => true,
+            AccessModifier.Protected => originSpecified && IsDerivedFrom(instance.Class, member.Origin),
+            AccessModifier.Private => originSpecified && string.Equals(instance.Class.Name, member.Origin, StringComparison.Ordinal),
+            _ => false,
+        };
+    }
+
+    private bool IsDerivedFrom(ClassTypeSymbol candidate, string ancestorName)
+    {
+        if (string.Equals(candidate.Name, ancestorName, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var ancestor = _typeSystem.RequireClassSymbol(ancestorName);
+        return _typeSystem.IsSubtype(candidate, ancestor);
     }
 
     private sealed class EffectScope : IDisposable

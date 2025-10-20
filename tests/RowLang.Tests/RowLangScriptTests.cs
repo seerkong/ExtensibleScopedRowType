@@ -276,4 +276,53 @@ public class RowLangScriptTests
         var result = Assert.Single(module.ExecuteRuns(context));
         Assert.Equal("hello", Assert.IsType<StringValue>(result.Result).Value);
     }
+
+    [Fact]
+    public void AccessModifiersRestrictVisibility()
+    {
+        const string source = """
+        (module
+          (class Base
+            (open)
+            (method secret
+              (access private)
+              (return str)
+              (body (const str hidden)))
+            (method hint
+              (access protected)
+              (return str)
+              (body (const str hidden)))
+            (method reveal
+              (return str)
+              (body (Base::secret this))))
+          (class Derived ^(extends Base)
+            (open)
+            (method ping
+              (access protected)
+              (return str)
+              (body (concat (Base::hint this) (const str " via protected"))))
+            (method shout
+              (return str)
+              (body ($ this Derived::ping)))
+            (method try-secret
+              (return str)
+              (body (Base::secret this))))
+          (run Base reveal)
+          (run Derived shout))
+        """;
+
+        var module = RowLangScript.Compile(source);
+        var context = module.CreateExecutionContext();
+
+        var runs = module.ExecuteRuns(context).ToArray();
+        Assert.Equal(2, runs.Length);
+        Assert.Equal("hidden", Assert.IsType<StringValue>(runs[0].Result).Value);
+        Assert.Equal("hidden via protected", Assert.IsType<StringValue>(runs[1].Result).Value);
+
+        var baseInstance = context.Instantiate("Base");
+        Assert.Throws<InvalidOperationException>(() => context.Invoke(baseInstance, "secret"));
+
+        var derived = context.Instantiate("Derived");
+        Assert.Throws<InvalidOperationException>(() => context.Invoke(derived, "try-secret"));
+    }
 }
