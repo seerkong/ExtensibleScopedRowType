@@ -212,6 +212,47 @@ public sealed class ExecutionContext
     public Value Invoke(ObjectValue instance, string memberName, params Value[] arguments)
         => Invoke(instance, memberName, origin: null, arguments);
 
+    /// <summary>
+    /// Invokes a member with type projection support: (instance as TargetType)::memberName
+    /// </summary>
+    public Value InvokeWithProjection(ObjectValue instance, string targetTypeName, string memberName, params Value[] arguments)
+    {
+        var targetType = _typeSystem.RequireClassSymbol(targetTypeName);
+        var projection = new TypeProjection(instance.Class, targetType);
+        
+        if (!projection.IsValidProjection(_typeSystem))
+        {
+            throw new InvalidOperationException($"Invalid projection: {instance.Class.Name} cannot be viewed as {targetTypeName}");
+        }
+
+        // For trait projections, find the trait implementation
+        if (targetType.IsTrait)
+        {
+            return InvokeTraitMember(instance, targetType, memberName, arguments);
+        }
+
+        // For class projections, use origin-specific dispatch
+        return Invoke(instance, memberName, targetTypeName, arguments);
+    }
+
+    private Value InvokeTraitMember(ObjectValue instance, ClassTypeSymbol traitType, string memberName, Value[] arguments)
+    {
+        if (!instance.Rows.TryGetValue(memberName, out var implementations))
+        {
+            throw new InvalidOperationException($"Member '{memberName}' does not exist on {instance.Class.Name}.");
+        }
+
+        // Find the topmost implementation (trait semantics: always points to top)
+        var topImplementation = implementations.FirstOrDefault();
+        if (topImplementation == null)
+        {
+            throw new InvalidOperationException($"No implementation found for trait member '{traitType.Name}::{memberName}'");
+        }
+
+        EnsureEffectsAllowed(topImplementation.Function.Signature);
+        return topImplementation.Function.Body(new InvocationContext(this, instance), arguments);
+    }
+
     public Value Invoke(ObjectValue instance, string memberName, string? origin, params Value[] arguments)
     {
         if (!instance.Rows.TryGetValue(memberName, out var implementations))

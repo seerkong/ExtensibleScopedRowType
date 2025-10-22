@@ -102,6 +102,7 @@ public static class RowLangScript
         private readonly TypeSystem _typeSystem;
         private readonly TypeRegistry _registry;
         private readonly List<RunDirective> _runs = new();
+        private readonly Stack<IReadOnlyDictionary<string, TypeSymbol>> _typeParameterScopes = new();
 
         public ModuleBuilder(TypeSystem typeSystem)
         {
@@ -302,7 +303,8 @@ public static class RowLangScript
 
             if (declaredRowTypeName is not null)
             {
-                if (_registry.Require(declaredRowTypeName) is not RowTypeSymbol expectedRow)
+                var declaredType = ResolveTypeByName(declaredRowTypeName, "class row type");
+                if (declaredType is not RowTypeSymbol expectedRow)
                 {
                     throw new InvalidOperationException($"Type '{declaredRowTypeName}' is not a row type.");
                 }
@@ -321,21 +323,27 @@ public static class RowLangScript
                 throw new InvalidOperationException("(row-type <name> ...) requires a name.");
             }
 
-            var rowName = ExpectIdentifier(list.Elements[1], "row type name").QualifiedName;
+            var identifier = ExpectIdentifier(list.Elements[1], "row type name", allowAnnotations: true);
+            var rowName = identifier.QualifiedName;
+            var (typeParameters, parameterMap) = ParseTypeParameters(identifier);
+
+            using var scope = PushTypeParameterScope(parameterMap);
+
             var isOpen = true;
             var baseRows = new List<RowTypeSymbol>();
+            var spreadPlaceholders = new List<RowMember>();
             var members = new List<RowMember>();
 
             foreach (var clauseNode in list.Elements[2..])
             {
-                if (clauseNode is SExprIdentifier identifier)
+                if (clauseNode is SExprIdentifier identifierClause)
                 {
-                    if (TryParseRowSpread(identifier, baseRows, ref isOpen))
+                    if (TryParseRowSpread(identifierClause, rowName, baseRows, spreadPlaceholders, ref isOpen, parameterMap))
                     {
                         continue;
                     }
 
-                    throw new InvalidOperationException($"Unexpected identifier '{identifier.QualifiedName}' in row-type '{rowName}'.");
+                    throw new InvalidOperationException($"Unexpected identifier '{identifierClause.QualifiedName}' in row-type '{rowName}'.");
                 }
 
                 if (clauseNode is not SExprList clause || clause.Elements.IsDefaultOrEmpty)
@@ -356,11 +364,11 @@ public static class RowLangScript
                     case "extends":
                         foreach (var entry in FlattenArgumentNodes(clause.Elements.Skip(1)))
                         {
-                            var baseName = ExpectIdentifier(entry, "row type base").QualifiedName;
-                            var symbol = _registry.Require(baseName);
+                            var baseIdentifier = ExpectIdentifier(entry, "row type base");
+                            var symbol = ResolveType(baseIdentifier, "row type base");
                             if (symbol is not RowTypeSymbol row)
                             {
-                                throw new InvalidOperationException($"Type '{baseName}' is not a row type.");
+                                throw new InvalidOperationException($"Type '{baseIdentifier.QualifiedName}' is not a row type.");
                             }
 
                             baseRows.Add(row);
@@ -383,6 +391,17 @@ public static class RowLangScript
                     case "field":
                         members.Add(ParseField(rowName, clause));
                         break;
+                    case "spread":
+                        foreach (var entry in FlattenArgumentNodes(clause.Elements.Skip(1)))
+                        {
+                            var target = ExpectIdentifier(entry, "row spread target");
+                            if (!TryParseRowSpread(target, rowName, baseRows, spreadPlaceholders, ref isOpen, parameterMap))
+                            {
+                                throw new InvalidOperationException($"Row spread target '{target.QualifiedName}' is not valid.");
+                            }
+                        }
+
+                        break;
                     default:
                         throw new InvalidOperationException($"Unknown row type clause '{clauseHead.QualifiedName}'.");
                 }
@@ -394,12 +413,26 @@ public static class RowLangScript
                 aggregated.AddRange(baseRow.Members);
             }
 
+            aggregated.AddRange(spreadPlaceholders);
             aggregated.AddRange(members);
 
-            _typeSystem.DefineRowType(rowName, aggregated, isOpen);
+            if (typeParameters.Length > 0)
+            {
+                _typeSystem.DefineGenericRowType(rowName, typeParameters, aggregated, isOpen);
+            }
+            else
+            {
+                _typeSystem.DefineRowType(rowName, aggregated, isOpen);
+            }
         }
 
-        private bool TryParseRowSpread(SExprIdentifier identifier, List<RowTypeSymbol> baseRows, ref bool isOpen)
+        private bool TryParseRowSpread(
+            SExprIdentifier identifier,
+            string owner,
+            List<RowTypeSymbol> baseRows,
+            List<RowMember> spreadPlaceholders,
+            ref bool isOpen,
+            IReadOnlyDictionary<string, TypeParameter> typeParameters)
         {
             var name = identifier.QualifiedName;
             if (!name.StartsWith("..", StringComparison.Ordinal))
@@ -419,7 +452,18 @@ public static class RowLangScript
                 throw new InvalidOperationException("Row spread must specify a target type, e.g. '..SomeRow'.");
             }
 
-            var symbol = _registry.Require(target);
+            if (typeParameters.Count > 0 && typeParameters.TryGetValue(target, out var parameter))
+            {
+                if (!parameter.IsRowParameter)
+                {
+                    throw new InvalidOperationException($"Type parameter '{target}' must be declared as a row parameter (use '..{target}' in type-params) to be spread.");
+                }
+
+                spreadPlaceholders.Add(new RowMember(".." + parameter.Name, parameter, RowQualifier.Default, owner, false));
+                return true;
+            }
+
+            var symbol = ResolveTypeByName(target, "row spread target");
             if (symbol is not RowTypeSymbol rowType)
             {
                 throw new InvalidOperationException($"Row spread target '{target}' is not a row type.");
@@ -432,6 +476,245 @@ public static class RowLangScript
             }
 
             return true;
+        }
+
+        private (ImmutableArray<TypeParameter> Parameters, Dictionary<string, TypeParameter> Map) ParseTypeParameters(SExprIdentifier identifier)
+        {
+            if (identifier.PostfixAnnotations.Count == 0)
+            {
+                return (ImmutableArray<TypeParameter>.Empty, new Dictionary<string, TypeParameter>(StringComparer.Ordinal));
+            }
+
+            ImmutableArray<TypeParameter>.Builder? builder = null;
+            Dictionary<string, TypeParameter>? map = null;
+
+            foreach (var annotation in identifier.PostfixAnnotations)
+            {
+                if (annotation is not SExprList annotationList || annotationList.Elements.IsDefaultOrEmpty)
+                {
+                    throw new InvalidOperationException("Row type annotation must be a non-empty list.");
+                }
+
+                var head = ExpectIdentifier(annotationList.Elements[0], "row type annotation");
+                if (!string.Equals(head.QualifiedName, "type-params", StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException($"Unknown row type annotation '{head.QualifiedName}'.");
+                }
+
+                if (builder is not null)
+                {
+                    throw new InvalidOperationException("Duplicate type-params annotation on row type.");
+                }
+
+                if (annotationList.Elements.Length != 2)
+                {
+                    throw new InvalidOperationException("^(type-params [...]) expects exactly one argument.");
+                }
+
+                if (annotationList.Elements[1] is not SExprArray array)
+                {
+                    throw new InvalidOperationException("Type parameter list must be an array.");
+                }
+
+                builder = ImmutableArray.CreateBuilder<TypeParameter>();
+                map = new Dictionary<string, TypeParameter>(StringComparer.Ordinal);
+
+                foreach (var element in array.Elements)
+                {
+                    if (element is not SExprIdentifier paramIdentifier)
+                    {
+                        throw new InvalidOperationException("Type parameter must be an identifier.");
+                    }
+
+                    var rawName = paramIdentifier.QualifiedName;
+                    var isRowParam = rawName.StartsWith("..", StringComparison.Ordinal);
+                    var name = isRowParam ? rawName[2..] : rawName;
+
+                    if (string.IsNullOrWhiteSpace(name))
+                    {
+                        throw new InvalidOperationException("Type parameter name cannot be empty.");
+                    }
+
+                    if (map.ContainsKey(name))
+                    {
+                        throw new InvalidOperationException($"Duplicate type parameter '{name}'.");
+                    }
+
+                    if (paramIdentifier.TypeAnnotation is not null)
+                    {
+                        throw new InvalidOperationException("Type parameter constraints are not supported yet.");
+                    }
+
+                    var parameter = new TypeParameter(name)
+                    {
+                        IsRowParameter = isRowParam,
+                    };
+
+                    builder.Add(parameter);
+                    map.Add(name, parameter);
+                }
+            }
+
+            return (builder?.ToImmutable() ?? ImmutableArray<TypeParameter>.Empty,
+                map ?? new Dictionary<string, TypeParameter>(StringComparer.Ordinal));
+        }
+
+        private IDisposable PushTypeParameterScope(IReadOnlyDictionary<string, TypeParameter> parameters)
+        {
+            if (parameters.Count == 0)
+            {
+                return EmptyDisposable.Instance;
+            }
+
+            var scope = parameters.ToDictionary(static kvp => kvp.Key, kvp => (TypeSymbol)kvp.Value, StringComparer.Ordinal);
+            _typeParameterScopes.Push(scope);
+            return new ScopeGuard(_typeParameterScopes);
+        }
+
+        private bool TryResolveTypeParameter(string name, out TypeSymbol? symbol)
+        {
+            foreach (var scope in _typeParameterScopes)
+            {
+                if (scope.TryGetValue(name, out var candidate))
+                {
+                    symbol = candidate;
+                    return true;
+                }
+            }
+
+            symbol = null;
+            return false;
+        }
+
+        private TypeSymbol ResolveTypeByName(string name, string description)
+        {
+            if (TryResolveTypeParameter(name, out var parameter) && parameter is not null)
+            {
+                return parameter;
+            }
+
+            if (TryParseGenericReference(name, out var genericName, out var argumentNames))
+            {
+                var genericSymbol = _registry.Require(genericName);
+                if (genericSymbol is GenericRowTypeSymbol genericRow)
+                {
+                    var argumentSymbols = argumentNames
+                        .Select(arg => ResolveTypeByName(arg, $"type argument '{arg}'"))
+                        .ToArray();
+                    return _typeSystem.InstantiateGenericRowType(genericRow, argumentSymbols);
+                }
+
+                throw new InvalidOperationException($"Type '{genericName}' does not support generic arguments.");
+            }
+
+            return _registry.Require(name);
+        }
+
+        private static bool TryParseGenericReference(string name, out string genericName, out ImmutableArray<string> argumentNames)
+        {
+            var ltIndex = name.IndexOf('<');
+            if (ltIndex <= 0 || name[^1] != '>')
+            {
+                genericName = string.Empty;
+                argumentNames = ImmutableArray<string>.Empty;
+                return false;
+            }
+
+            genericName = name[..ltIndex];
+            var argumentsSection = name[(ltIndex + 1)..^1];
+            if (argumentsSection.Length == 0)
+            {
+                argumentNames = ImmutableArray<string>.Empty;
+                return true;
+            }
+
+            argumentNames = SplitGenericArguments(argumentsSection);
+            return true;
+        }
+
+        private static ImmutableArray<string> SplitGenericArguments(string argumentsSection)
+        {
+            var builder = ImmutableArray.CreateBuilder<string>();
+            var depth = 0;
+            var start = 0;
+
+            for (var i = 0; i < argumentsSection.Length; i++)
+            {
+                var ch = argumentsSection[i];
+                switch (ch)
+                {
+                    case '<':
+                        depth++;
+                        break;
+                    case '>':
+                        depth--;
+                        if (depth < 0)
+                        {
+                            throw new InvalidOperationException("Generic argument list has mismatched brackets.");
+                        }
+                        break;
+                    case ',' when depth == 0:
+                        var part = argumentsSection[start..i].Trim();
+                        if (part.Length == 0)
+                        {
+                            throw new InvalidOperationException("Generic argument cannot be empty.");
+                        }
+
+                        builder.Add(part);
+                        start = i + 1;
+                        break;
+                }
+            }
+
+            if (depth != 0)
+            {
+                throw new InvalidOperationException("Generic argument list has mismatched brackets.");
+            }
+
+            var last = argumentsSection[start..].Trim();
+            if (last.Length == 0)
+            {
+                throw new InvalidOperationException("Generic argument cannot be empty.");
+            }
+
+            builder.Add(last);
+            return builder.ToImmutable();
+        }
+
+        private sealed class ScopeGuard : IDisposable
+        {
+            private readonly Stack<IReadOnlyDictionary<string, TypeSymbol>> _stack;
+            private bool _disposed;
+
+            public ScopeGuard(Stack<IReadOnlyDictionary<string, TypeSymbol>> stack)
+            {
+                _stack = stack;
+            }
+
+            public void Dispose()
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                if (_stack.Count == 0)
+                {
+                    throw new InvalidOperationException("Type parameter scope underflow.");
+                }
+
+                _stack.Pop();
+                _disposed = true;
+            }
+        }
+
+        private sealed class EmptyDisposable : IDisposable
+        {
+            public static readonly EmptyDisposable Instance = new();
+
+            public void Dispose()
+            {
+            }
         }
 
         private void ParseBases(SExprList clause, List<(string, InheritanceKind, AccessModifier)> bases)
@@ -972,6 +1255,8 @@ public static class RowLangScript
                         return EvaluateConcat(list, scope, invocation, arguments);
                     case "$":
                         return EvaluateSend(list, scope, invocation, arguments);
+                    case "as":
+                        return EvaluateTypeProjection(list, scope, invocation, arguments);
                 }
 
                 if (!head.Namespace.IsDefaultOrEmpty)
@@ -1274,6 +1559,36 @@ public static class RowLangScript
                 };
             }
 
+            private Value EvaluateTypeProjection(SExprList list, Scope scope, InvocationContext invocation, IReadOnlyList<Value> arguments)
+            {
+                // (as instance TargetType memberName [args...])
+                if (list.Elements.Length < 4)
+                {
+                    throw new InvalidOperationException("(as instance TargetType memberName [args...]) requires at least 3 arguments.");
+                }
+
+                var instanceExpr = list.Elements[1];
+                var targetTypeNode = list.Elements[2];
+                var memberNameNode = list.Elements[3];
+
+                var instance = Evaluate(instanceExpr, scope, invocation, arguments);
+                if (instance is not ObjectValue objectValue)
+                {
+                    throw new InvalidOperationException("Type projection can only be applied to object instances.");
+                }
+
+                var targetTypeName = ExpectIdentifier(targetTypeNode, "target type").QualifiedName;
+                var memberName = ExpectIdentifier(memberNameNode, "member name").QualifiedName;
+
+                var invokeArgs = new List<Value>();
+                for (int i = 4; i < list.Elements.Length; i++)
+                {
+                    invokeArgs.Add(Evaluate(list.Elements[i], scope, invocation, arguments));
+                }
+
+                return invocation.Context.InvokeWithProjection(objectValue, targetTypeName, memberName, invokeArgs.ToArray());
+            }
+
             private static void EnsureOperandCount(SExprList list, int minimum, string form)
             {
                 if (list.Elements.Length <= minimum)
@@ -1470,8 +1785,11 @@ public static class RowLangScript
         private TypeSymbol ResolveType(SExprNode node, string description)
         {
             var identifier = ExpectIdentifier(node, description);
-            return _registry.Require(identifier.QualifiedName);
+            return ResolveType(identifier, description);
         }
+
+        private TypeSymbol ResolveType(SExprIdentifier identifier, string description)
+            => ResolveTypeByName(identifier.QualifiedName, description);
 
         private static SExprIdentifier ExpectIdentifier(SExprNode node, string description, bool allowAnnotations = false)
         {

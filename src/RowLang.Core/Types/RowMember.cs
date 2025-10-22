@@ -17,5 +17,10 @@ public sealed record RowMember(
 
     public bool ShouldForward => Qualifier is RowQualifier.Default or RowQualifier.Inherit or RowQualifier.Override;
 
+    /// <summary>
+    /// Whether this represents a spread parameter (..Q) in a generic row type
+    /// </summary>
+    public bool IsSpreadParameter => Name.StartsWith("..");
+
     public AccessModifier Access { get; init; } = AccessModifier.Public;
 }

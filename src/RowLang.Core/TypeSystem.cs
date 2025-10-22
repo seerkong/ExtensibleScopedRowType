@@ -62,6 +62,31 @@ public sealed class TypeSystem
         return definition;
     }
 
+    public GenericRowTypeSymbol DefineGenericRowType(
+        string name, 
+        IEnumerable<TypeParameter> typeParameters,
+        IEnumerable<RowMember> members, 
+        bool isOpen)
+    {
+        var genericRow = new GenericRowTypeSymbol(
+            name, 
+            typeParameters.ToImmutableArray(), 
+            members.ToImmutableArray(), 
+            isOpen);
+        
+        _registry.Register(genericRow);
+        return genericRow;
+    }
+
+    public RowTypeSymbol InstantiateGenericRowType(
+        GenericRowTypeSymbol genericType,
+        params TypeSymbol[] typeArguments)
+    {
+        var instantiated = (RowTypeSymbol)genericType.Instantiate(typeArguments.ToImmutableArray());
+        _registry.Register(instantiated);
+        return instantiated;
+    }
+
     public RowTypeSymbol DefineRowType(string name, IEnumerable<RowMember> members, bool isOpen)
     {
         var row = new RowTypeSymbol(name, members, isOpen);

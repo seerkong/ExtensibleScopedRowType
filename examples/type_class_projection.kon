@@ -1,0 +1,42 @@
+// Type class example with as projection syntax
+(module
+  (row-type ToString
+    (method to_string
+      (return str)))
+
+  (class ToString
+    (trait)
+    (method to_string
+      (return str)
+      (body (const str "default"))))
+
+  (class Base ~ ToString ^(extends ToString)
+    (method to_string
+      (return str)
+      (body (const str "Base"))))
+
+  (class Derived ^(extends Base)
+    (method to_string
+      (return str)
+      (body (const str "Derived"))))
+
+  (class ProjectionDemo
+    (method run
+      (return str)
+      (body
+        (let ((instance (new Derived)))
+          (as instance ToString to_string))))
+    (method direct
+      (return str)
+      (body
+        (let ((instance (new Derived)))
+          (call instance to_string))))
+    (method ancestor
+      (return str)
+      (body
+        (let ((instance (new Derived)))
+          (call instance Base::to_string)))))
+
+  (run ProjectionDemo run)
+  (run ProjectionDemo direct)
+  (run ProjectionDemo ancestor))

@@ -35,6 +35,8 @@ public sealed class InvocationContext
         _self = self;
     }
 
+    public ExecutionContext Context => _executionContext;
+    
     public ExecutionContext Execution => _executionContext;
 
     public ObjectValue? Self => _self;

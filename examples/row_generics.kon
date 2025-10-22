@@ -1,0 +1,34 @@
+// Example of generic row types with type parameters and row spreads
+(module
+  (row-type Tail
+    (method c
+      (return bool))
+    (method d
+      (return int)))
+
+  (row-type T1 ^(type-params [P ..Rest])
+    (method a
+      (return P))
+    (method b
+      (return str))
+    (spread ..Rest))
+
+  (class TailImpl ~ Tail
+    (method c
+      (return bool)
+      (body (const bool true)))
+    (method d
+      (return int)
+      (body (const int 100))))
+
+  (class TestClass ~ T1<int,Tail> ^(extends TailImpl)
+    (method a
+      (return int)
+      (body (const int 42)))
+    (method b
+      (return str)
+      (body (const str "hello"))))
+
+  (run TestClass a)
+  (run TestClass c)
+  (run TestClass d))
